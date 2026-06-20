@@ -14,15 +14,10 @@ namespace dini {
     namespace {
 
     std::atomic<SchemaId> nextSchemaId {1};
-    std::atomic_bool globalSchemaFrozen {false};
-
     void requireMutable(const SchemaBuilder::Impl *builder)
     {
         if (!builder) {
             throw SchemaError("schema builder is invalid");
-        }
-        if (globalSchemaFrozen.load(std::memory_order_acquire)) {
-            throw SchemaError("schema definition is globally frozen");
         }
         if (builder->data.frozen) {
             throw SchemaError("schema builder is frozen");
@@ -214,16 +209,6 @@ const RelationDefinitionRecord *findRelationByColumn(const SchemaDefinitionData 
 const SchemaDefinitionData &schemaData(const EngineSchema &schema)
 {
     return *schema._impl.constData();
-}
-
-bool schemaDefinitionGloballyFrozen() noexcept
-{
-    return globalSchemaFrozen.load(std::memory_order_acquire);
-}
-
-void freezeSchemaDefinitionsGlobally() noexcept
-{
-    globalSchemaFrozen.store(true, std::memory_order_release);
 }
 
 EngineSchema::EngineSchema() : _impl(new Impl(this)) {}
@@ -429,23 +414,19 @@ RelationHandle TableBuilder::addAssociation(const AssociationDefinition &definit
     columnRecord.info.type = ValueType::UInt64;
     columnRecord.info.index = IndexKind::Normal;
     columnRecord.info.association = true;
-    columnRecord.info.volatileData = definition.volatileData;
     columnRecord.normalDefinition = ColumnDefinition {
         .debugName = definition.debugName,
         .type = ValueType::UInt64,
         .index = IndexKind::Normal,
         .nullable = true,
-        .volatileData = definition.volatileData,
     };
     auto column = addColumnRecord(_impl->builder, container, std::move(columnRecord));
 
     RelationDefinitionRecord relation;
-    relation.definition = definition;
     relation.info.id = _impl->builder->data.nextRelationId++;
     relation.info.containerId = container.info.id;
     relation.info.column = column;
     relation.info.target = definition.target;
-    relation.info.parentRelation = definition.parentRelation;
     container.relations.push_back(relation);
     return RelationHandle(_impl->builder->data.schemaId, container.info.id, relation.info.id, column, definition.debugName);
 }

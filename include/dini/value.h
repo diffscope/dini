@@ -233,7 +233,7 @@ public:
      * @pre Both values must be comparable by their active types.
      * @post Returns true when type and payload are equal.
      */
-    friend bool operator==(const Value &lhs, const Value &rhs);
+    DINI_EXPORT friend bool operator==(const Value &lhs, const Value &rhs);
 
     /**
      * @brief Compares two values for exact inequality.
@@ -241,7 +241,7 @@ public:
      * @pre Both values must be comparable by their active types.
      * @post Returns true when type or payload differ.
      */
-    friend bool operator!=(const Value &lhs, const Value &rhs);
+    DINI_EXPORT friend bool operator!=(const Value &lhs, const Value &rhs);
 
 private:
     struct Impl;

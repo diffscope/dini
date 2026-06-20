@@ -106,12 +106,12 @@ const Value::Storage &Value::storage() const noexcept
     return impl.storage;
 }
 
-bool operator==(const Value &lhs, const Value &rhs)
+DINI_EXPORT bool operator==(const Value &lhs, const Value &rhs)
 {
     return lhs.storage() == rhs.storage();
 }
 
-bool operator!=(const Value &lhs, const Value &rhs)
+DINI_EXPORT bool operator!=(const Value &lhs, const Value &rhs)
 {
     return !(lhs == rhs);
 }

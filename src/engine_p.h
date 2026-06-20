@@ -60,6 +60,7 @@ struct Transaction::Impl {
     std::unordered_map<ItemId, RuntimeItem> rollbackItems;
     std::map<std::pair<ContainerId, std::string>, std::vector<ItemId>> rollbackListGroups;
     std::map<RuntimeIndexKey, std::map<std::string, std::set<ItemId>>> rollbackColumnIndexes;
+    bool rollbackApplied = false;
 };
 
 struct TransactionContext::Impl {

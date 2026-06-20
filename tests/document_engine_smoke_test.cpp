@@ -42,8 +42,6 @@ TEST(DocumentEngineSmokeTest, DefinesSchemaAndExercisesBasicDocumentOperations)
     auto aliceDocument = aliceList.setAssociation(AssociationDefinition {
         .debugName = "document",
         .target = documentTable.handle(),
-        .parentRelation = true,
-        .volatileData = false,
     });
     auto aliceName = aliceList.addColumn(stringColumn("name", IndexKind::Normal));
 
@@ -63,8 +61,6 @@ TEST(DocumentEngineSmokeTest, DefinesSchemaAndExercisesBasicDocumentOperations)
     auto bobParent = bobTable.addAssociation(AssociationDefinition {
         .debugName = "alice",
         .target = aliceList.handle(),
-        .parentRelation = true,
-        .volatileData = false,
     });
     auto bobVariantZero = bobTable.addVariant("kind0");
     auto bobVariantOne = bobTable.addVariant("kind1");

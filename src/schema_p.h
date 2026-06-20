@@ -21,7 +21,6 @@ struct ColumnDefinitionRecord {
 
 struct RelationDefinitionRecord {
     RelationInfo info;
-    AssociationDefinition definition;
 };
 
 struct VariantDefinitionRecord {
@@ -81,8 +80,6 @@ const RelationDefinitionRecord *findRelation(const SchemaDefinitionData &data, C
 RelationDefinitionRecord *findRelationByColumn(SchemaDefinitionData &data, ContainerId containerId, ColumnId columnId);
 const RelationDefinitionRecord *findRelationByColumn(const SchemaDefinitionData &data, ContainerId containerId, ColumnId columnId);
 const SchemaDefinitionData &schemaData(const EngineSchema &schema);
-bool schemaDefinitionGloballyFrozen() noexcept;
-void freezeSchemaDefinitionsGlobally() noexcept;
 
 } // namespace dini
 

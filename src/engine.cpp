@@ -102,7 +102,6 @@ namespace dini {
                 hashCombine(hash, relation.info.id);
                 hashCombine(hash, relation.info.column.columnId());
                 hashCombine(hash, associationTargetContainerId(relation.info.target));
-                hashCombine(hash, relation.info.parentRelation ? 1 : 0);
             }
             for (const auto &variant : container.variants) {
                 hashCombine(hash, variant.id);
@@ -238,6 +237,13 @@ namespace dini {
         return it == item.values.end() ? Value::null() : it->value;
     }
 
+    bool hasColumnValue(const ItemSnapshot &item, ColumnId columnId)
+    {
+        return std::any_of(item.values.begin(), item.values.end(), [columnId](const ColumnValue &columnValue) {
+            return columnValue.column.columnId() == columnId;
+        });
+    }
+
     void setColumnValue(ItemSnapshot &item, ColumnHandle column, Value value)
     {
         auto it = std::find_if(item.values.begin(), item.values.end(), [&](const ColumnValue &columnValue) {
@@ -338,9 +344,7 @@ namespace dini {
         const auto &container = containerFor(schemaDefinition, snapshot.containerId);
         for (const auto &relation : container.relations) {
             const auto value = valueForColumn(snapshot, relation.info.column.columnId());
-            if (relation.info.parentRelation) {
-                snapshot.parentId = itemIdFromValue(value);
-            }
+            snapshot.parentId = itemIdFromValue(value);
         }
     }
 
@@ -540,6 +544,13 @@ namespace dini {
     {
         if (transaction.state == TransactionState::Active) {
             transaction.state = TransactionState::Failed;
+            if (transaction.engine && !transaction.rollbackApplied) {
+                transaction.engine->items = transaction.rollbackItems;
+                transaction.engine->listGroups = transaction.rollbackListGroups;
+                transaction.engine->columnIndexes = transaction.rollbackColumnIndexes;
+                transaction.engine->activeTransaction = false;
+                transaction.rollbackApplied = true;
+            }
         }
     }
 
@@ -603,11 +614,7 @@ namespace dini {
     {
         const auto &schemaDefinition = schemaData(engine.schema);
         const auto &container = containerFor(schemaDefinition, snapshot.containerId);
-        const bool parentScopedUnique = std::any_of(container.relations.begin(),
-                                                    container.relations.end(),
-                                                    [](const auto &relation) {
-                                                        return relation.info.parentRelation;
-                                                    });
+        const bool parentScopedUnique = !container.relations.empty();
         for (const auto &column : container.columns) {
             if (column.info.index != IndexKind::Unique) {
                 continue;
@@ -616,15 +623,12 @@ namespace dini {
             if (!participatesInUnique(column, value)) {
                 continue;
             }
-            if (parentScopedUnique && !snapshot.parentId) {
-                continue;
-            }
             for (const auto &[otherId, other] : engine.items) {
                 if (otherId == snapshot.id || other.snapshot.containerId != snapshot.containerId) {
                     continue;
                 }
                 if (parentScopedUnique) {
-                    if (!other.snapshot.parentId || snapshot.parentId != other.snapshot.parentId) {
+                    if (snapshot.parentId != other.snapshot.parentId) {
                         continue;
                     }
                 }
@@ -643,7 +647,7 @@ namespace dini {
     {
         const auto &container = containerFor(schemaDefinition, snapshot.containerId);
         for (const auto &column : container.columns) {
-            if (valueForColumn(snapshot, column.info.id).isNull() == false) {
+            if (hasColumnValue(snapshot, column.info.id)) {
                 continue;
             }
             if (column.info.computed || column.info.association) {
@@ -782,6 +786,19 @@ namespace dini {
         observeItemId(engine, id);
     }
 
+    ItemSnapshot snapshotForPersistence(const DocumentEngine::Impl &engine, ItemSnapshot snapshot)
+    {
+        const auto &schemaDefinition = schemaData(engine.schema);
+        snapshot.values.erase(std::remove_if(snapshot.values.begin(),
+                                             snapshot.values.end(),
+                                             [&](const ColumnValue &columnValue) {
+                                                 const auto &column = columnFor(schemaDefinition, columnValue.column);
+                                                 return column.info.volatileData;
+                                             }),
+                              snapshot.values.end());
+        return snapshot;
+    }
+
     void eraseSnapshot(DocumentEngine::Impl &engine, const ItemSnapshot &snapshot)
     {
         removeItemFromIndexes(engine, snapshot);
@@ -868,9 +885,65 @@ namespace dini {
 
     void applyChangeSet(DocumentEngine::Impl &engine, const ChangeSet &changeSet)
     {
+        std::vector<ChangeOperation> pendingInserts;
         for (const auto &operation : changeSet.operations()) {
-            applyOperation(engine, operation);
+            try {
+                applyOperation(engine, operation);
+            } catch (const DiniError &) {
+                const auto kind = operation.kind();
+                if (kind != ChangeOperationKind::ItemInserted && kind != ChangeOperationKind::ListInserted) {
+                    throw;
+                }
+                pendingInserts.push_back(operation);
+            }
         }
+
+        while (!pendingInserts.empty()) {
+            bool progressed = false;
+            for (auto it = pendingInserts.begin(); it != pendingInserts.end();) {
+                try {
+                    applyOperation(engine, *it);
+                    it = pendingInserts.erase(it);
+                    progressed = true;
+                } catch (const DiniError &) {
+                    ++it;
+                }
+            }
+            if (!progressed) {
+                applyOperation(engine, pendingInserts.front());
+            }
+        }
+    }
+
+    bool createsUndoStep(const ChangeSet &fullChangeSet, const ChangeSet &nonVolatileChangeSet)
+    {
+        if (fullChangeSet.empty()) {
+            return false;
+        }
+        if (nonVolatileChangeSet.empty()) {
+            return true;
+        }
+
+        bool hasInsert = false;
+        bool hasOnlyInsertInitialization = true;
+        for (const auto &operation : nonVolatileChangeSet.operations()) {
+            switch (operation.kind()) {
+                case ChangeOperationKind::ItemInserted:
+                case ChangeOperationKind::ListInserted:
+                    hasInsert = true;
+                    break;
+                case ChangeOperationKind::ComputedColumnUpdated:
+                    break;
+                default:
+                    hasOnlyInsertInitialization = false;
+                    break;
+            }
+        }
+
+        if (hasInsert && hasOnlyInsertInitialization) {
+            return nonVolatileChangeSet.operations().size() == 1;
+        }
+        return true;
     }
 
     Value fieldValue(const SchemaDefinitionData &schemaDefinition,
@@ -1203,7 +1276,6 @@ DocumentEngine::DocumentEngine(EngineSchema schema) : _impl(std::make_unique<Imp
         throw SchemaError("document engine requires a valid schema");
     }
     _impl->epochSeconds = unixSecondsNow();
-    freezeSchemaDefinitionsGlobally();
 }
 
 DocumentEngine::~DocumentEngine() = default;
@@ -1305,7 +1377,7 @@ View DocumentEngine::query(TableHandle table, const QuerySpec &spec) const
         }
         applyQuerySpec(schemaData(engine->schema), result, spec);
         return result;
-    })));
+    }, _impl->schema, table.containerId())));
 }
 
 View DocumentEngine::query(ListHandle list, const QuerySpec &spec) const
@@ -1338,7 +1410,7 @@ View DocumentEngine::query(ListHandle list, const QuerySpec &spec) const
         }
         applyQuerySpec(schemaData(engine->schema), result, spec);
         return result;
-    })));
+    }, _impl->schema, list.containerId())));
 }
 
 ByteArray DocumentEngine::createSnapshot() const
@@ -1356,7 +1428,7 @@ ByteArray DocumentEngine::createSnapshot() const
     for (const auto &[id, item] : _impl->items) {
         (void)id;
         if (!containerIsVolatile(*_impl, item.snapshot.containerId)) {
-            snapshots.push_back(item.snapshot);
+            snapshots.push_back(snapshotForPersistence(*_impl, item.snapshot));
         }
     }
     writer.writeSize(snapshots.size());
@@ -1430,6 +1502,9 @@ void DocumentEngine::restoreSnapshot(const ByteArray &snapshot)
 
 void DocumentEngine::replayCommitLog(const ByteArray &commitLog)
 {
+    if (commitLog.empty()) {
+        return;
+    }
     try {
         auto changeSet = deserializeEngineCommitLog(_impl->schema, commitLog);
         applyChangeSet(*_impl, changeSet);
@@ -2058,7 +2133,7 @@ CommitResult Transaction::commit()
             .commitLog = serializeEngineCommitLog(engine.schema, nonVolatile),
             .origin = _impl->origin,
         };
-        if (_impl->options.undoable && !nonVolatile.empty()) {
+        if (_impl->options.undoable && createsUndoStep(_impl->changeSet, nonVolatile)) {
             engine.undoStack.push_back(UndoStep(nonVolatile));
             result.createdUndoStep = true;
             if (!engine.redoStack.empty()) {
@@ -2085,6 +2160,11 @@ void Transaction::rollback()
         throw TransactionError("transaction cannot be rolled back");
     }
     auto &engine = *_impl->engine;
+    if (_impl->rollbackApplied) {
+        _impl->state = TransactionState::RolledBack;
+        engine.activeTransaction = false;
+        return;
+    }
     auto inverse = _impl->changeSet.filterVolatile().invert();
     try {
         applyChangeSet(engine, inverse);

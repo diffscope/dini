@@ -27,9 +27,9 @@ class TransactionContext;
 /**
  * @brief Describes a normal stored column.
  *
- * ColumnDefinition is consumed during schema definition only. After the first
- * DocumentEngine instance is created, schema mutation must be rejected and column
- * behavior becomes immutable.
+ * ColumnDefinition is consumed during schema definition only. Once its owning
+ * SchemaBuilder is frozen, the produced EngineSchema and column behavior become
+ * immutable.
  */
 struct DINI_EXPORT ColumnDefinition {
     std::string debugName;
@@ -77,8 +77,6 @@ using AssociationTarget = std::variant<TableHandle, ListHandle>;
 struct DINI_EXPORT AssociationDefinition {
     std::string debugName;
     AssociationTarget target;
-    bool parentRelation = true;
-    bool volatileData = false;
 };
 
 /**
@@ -153,7 +151,6 @@ struct DINI_EXPORT RelationInfo {
     ContainerId containerId = 0;
     ColumnHandle column;
     AssociationTarget target;
-    bool parentRelation = true;
 };
 
 /**
@@ -331,9 +328,9 @@ private:
 /**
  * @brief Builder for immutable EngineSchema objects.
  *
- * SchemaBuilder owns schema definition state until freeze() is called. The engine
- * specification requires all schema definition to finish before the first
- * DocumentEngine instance is initialized.
+ * SchemaBuilder owns schema definition state until freeze() is called. Frozen
+ * EngineSchema instances are immutable and may be shared by many DocumentEngine
+ * instances.
  */
 class DINI_EXPORT SchemaBuilder {
 public:
@@ -342,7 +339,7 @@ public:
     /**
      * @brief Creates an empty schema builder.
      *
-     * @pre No DocumentEngine instance should have frozen global schema mutation.
+     * @pre None.
      * @post The builder can create tables and lists until freeze().
      */
     SchemaBuilder();
@@ -395,7 +392,7 @@ public:
      * @param debugName Optional diagnostic name.
      * @pre The builder must not be frozen.
      * @post Returns a TableBuilder for adding columns, variants, relations, and hooks.
-     * @throws SchemaError if schema definition is globally frozen or this builder is frozen.
+     * @throws SchemaError if this builder is invalid or frozen.
      */
     TableBuilder createTable(std::string debugName);
 
@@ -405,7 +402,7 @@ public:
      * @param debugName Optional diagnostic name.
      * @pre The builder must not be frozen.
      * @post Returns a ListBuilder for adding columns, associations, variants, and hooks.
-     * @throws SchemaError if schema definition is globally frozen or this builder is frozen.
+     * @throws SchemaError if this builder is invalid or frozen.
      */
     ListBuilder createList(std::string debugName);
 

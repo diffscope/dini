@@ -35,7 +35,7 @@ public:
      * @brief Creates a new empty document engine for a frozen schema.
      *
      * @param schema Immutable schema definition.
-     * @pre schema must be valid and globally frozen for runtime use.
+     * @pre schema must be a valid frozen EngineSchema.
      * @post The engine contains an empty document state and empty undo/redo history.
      * @throws SchemaError if schema is invalid or not usable for runtime instances.
      */
