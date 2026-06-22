@@ -466,6 +466,37 @@ void BM_AggregateMaxHinted(benchmark::State &state)
     }
 }
 
+void BM_AggregateCountByParent(benchmark::State &state)
+{
+    const auto &data = dataForSize(static_cast<int>(state.range(0)));
+    const auto aggregate = AggregationSpec {
+        .kind = AggregateKind::Count,
+        .groupBy = FieldRef::parent(data.itemParent),
+    };
+    for (auto _ : state) {
+        auto result = data.engine->view(data.itemTable).aggregate(aggregate).toVector();
+        benchmark::DoNotOptimize(result);
+    }
+}
+
+void BM_AggregateQueryParentThenCount(benchmark::State &state)
+{
+    const auto &data = dataForSize(static_cast<int>(state.range(0)),
+                                   DataOptions {.aggregateHints = true});
+    const auto aggregate = AggregationSpec {
+        .kind = AggregateKind::Count,
+        .groupBy = FieldRef::parent(data.itemParent),
+    };
+    const auto parent = data.parentIds[3];
+    const auto spec = singleFilter(FieldRef::parent(data.itemParent),
+                                  ComparisonOperator::Equal,
+                                  Value(static_cast<std::uint64_t>(parent)));
+    for (auto _ : state) {
+        auto result = data.engine->query(data.itemTable, spec).aggregate(aggregate).toVector();
+        benchmark::DoNotOptimize(result);
+    }
+}
+
 void BM_AggregateSumByParentFallback(benchmark::State &state)
 {
     const auto &data = dataForSize(static_cast<int>(state.range(0)),
@@ -492,6 +523,25 @@ void BM_AggregateSumByParentHinted(benchmark::State &state)
     };
     for (auto _ : state) {
         auto result = data.engine->view(data.itemTable).aggregate(aggregate).toVector();
+        benchmark::DoNotOptimize(result);
+    }
+}
+
+void BM_AggregateQueryParentThenSumHinted(benchmark::State &state)
+{
+    const auto &data = dataForSize(static_cast<int>(state.range(0)),
+                                   DataOptions {.aggregateHints = true});
+    const auto aggregate = AggregationSpec {
+        .kind = AggregateKind::Sum,
+        .valueField = FieldRef::column(data.x),
+        .groupBy = FieldRef::parent(data.itemParent),
+    };
+    const auto parent = data.parentIds[3];
+    const auto spec = singleFilter(FieldRef::parent(data.itemParent),
+                                  ComparisonOperator::Equal,
+                                  Value(static_cast<std::uint64_t>(parent)));
+    for (auto _ : state) {
+        auto result = data.engine->query(data.itemTable, spec).aggregate(aggregate).toVector();
         benchmark::DoNotOptimize(result);
     }
 }
@@ -545,8 +595,11 @@ BENCHMARK(BM_AggregateSumFallback)->Apply(addSizes);
 BENCHMARK(BM_AggregateSumHinted)->Apply(addSizes);
 BENCHMARK(BM_AggregateMaxFallback)->Apply(addSizes);
 BENCHMARK(BM_AggregateMaxHinted)->Apply(addSizes);
+BENCHMARK(BM_AggregateCountByParent)->Apply(addSizes);
+BENCHMARK(BM_AggregateQueryParentThenCount)->Apply(addSizes);
 BENCHMARK(BM_AggregateSumByParentFallback)->Apply(addSizes);
 BENCHMARK(BM_AggregateSumByParentHinted)->Apply(addSizes);
+BENCHMARK(BM_AggregateQueryParentThenSumHinted)->Apply(addSizes);
 BENCHMARK(BM_AggregateMaxByParentFallback)->Apply(addSizes);
 BENCHMARK(BM_AggregateMaxByParentHinted)->Apply(addSizes);
 

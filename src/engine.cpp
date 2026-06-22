@@ -1095,6 +1095,86 @@ namespace dini {
         }
     }
 
+    ComparisonOperator reverseComparisonOperator(ComparisonOperator op) noexcept
+    {
+        switch (op) {
+            case ComparisonOperator::Equal:
+                return ComparisonOperator::NotEqual;
+            case ComparisonOperator::NotEqual:
+                return ComparisonOperator::Equal;
+            case ComparisonOperator::Greater:
+                return ComparisonOperator::LessOrEqual;
+            case ComparisonOperator::Less:
+                return ComparisonOperator::GreaterOrEqual;
+            case ComparisonOperator::GreaterOrEqual:
+                return ComparisonOperator::Less;
+            case ComparisonOperator::LessOrEqual:
+                return ComparisonOperator::Greater;
+        }
+        return ComparisonOperator::NotEqual;
+    }
+
+    bool fieldAlwaysApplies(const SchemaDefinitionData &schemaDefinition,
+                            ContainerId containerId,
+                            const FieldRef &field)
+    {
+        if (field.kind() != FieldKind::Column) {
+            return true;
+        }
+        const auto column = field.column();
+        if (column.containerId() != containerId) {
+            return false;
+        }
+        return !columnFor(schemaDefinition, column).info.variantSpecific;
+    }
+
+    FilterExpression normalizeNegation(const SchemaDefinitionData &schemaDefinition,
+                                       ContainerId containerId,
+                                       const FilterExpression &expression,
+                                       bool negated = false)
+    {
+        const auto &impl = filterExpressionImpl(expression);
+        if (impl.empty) {
+            return negated ? FilterExpression::negate(FilterExpression {}) : expression;
+        }
+        if (impl.filter) {
+            if (!negated) {
+                return expression;
+            }
+            if (!fieldAlwaysApplies(schemaDefinition, containerId, impl.filter->field())) {
+                return FilterExpression::negate(expression);
+            }
+            return FilterExpression(Filter(impl.filter->field(),
+                                           reverseComparisonOperator(impl.filter->comparisonOperator()),
+                                           impl.filter->value()));
+        }
+        if (impl.op == FilterOperator::Not) {
+            if (impl.children.empty()) {
+                return negated ? FilterExpression {} : expression;
+            }
+            return normalizeNegation(schemaDefinition, containerId, impl.children.front(), !negated);
+        }
+
+        std::vector<FilterExpression> children;
+        children.reserve(impl.children.size());
+        for (const auto &child : impl.children) {
+            children.push_back(normalizeNegation(schemaDefinition, containerId, child, negated));
+        }
+        const auto op = impl.op.value_or(FilterOperator::And);
+        if ((!negated && op == FilterOperator::And) || (negated && op == FilterOperator::Or)) {
+            return FilterExpression::all(std::move(children));
+        }
+        return FilterExpression::any(std::move(children));
+    }
+
+    QuerySpec normalizedQuerySpec(const EngineSchema &schema, ContainerId containerId, const QuerySpec &spec)
+    {
+        return QuerySpec {
+            .filter = normalizeNegation(schemaData(schema), containerId, spec.filter),
+            .sortKeys = spec.sortKeys,
+        };
+    }
+
     std::optional<RuntimeIndexedFieldKey> indexedFieldKeyForFilter(ContainerId containerId, const Filter &filter)
     {
         if (filter.field().kind() == FieldKind::Id) {
@@ -1571,20 +1651,21 @@ View DocumentEngine::query(TableHandle table, const QuerySpec &spec) const
     _impl->schema.validate(table);
     validateQuerySpec(_impl->schema, table.containerId(), spec);
     auto *engine = _impl.get();
-    auto data = SharedDataPointer<View::Impl>(new View::Impl(nullptr, [engine, table, spec]() {
+    const auto normalizedSpec = normalizedQuerySpec(_impl->schema, table.containerId(), spec);
+    auto data = SharedDataPointer<View::Impl>(new View::Impl(nullptr, [engine, table, normalizedSpec]() {
         std::vector<ItemSnapshot> result;
-        executeQueryResults(*engine, table.containerId(), spec, false, [&](const ItemSnapshot &item) {
+        executeQueryResults(*engine, table.containerId(), normalizedSpec, false, [&](const ItemSnapshot &item) {
             result.push_back(item);
             return true;
         });
         return result;
     }, _impl->schema, table.containerId()));
-    data.data()->streamer = [engine, table, spec](const std::function<bool(const ItemSnapshot &)> &visitor,
-                                                  std::size_t offset,
-                                                  std::optional<std::size_t> limit) {
-        executeQueryResults(*engine, table.containerId(), spec, false, visitor, offset, limit);
+    data.data()->streamer = [engine, table, normalizedSpec](const std::function<bool(const ItemSnapshot &)> &visitor,
+                                                            std::size_t offset,
+                                                            std::optional<std::size_t> limit) {
+        executeQueryResults(*engine, table.containerId(), normalizedSpec, false, visitor, offset, limit);
     };
-    if (spec.filter.isEmpty()) {
+    if (normalizedSpec.filter.isEmpty()) {
         data.data()->aggregator = [engine, table](const AggregationSpec &aggregate,
                                                   std::size_t offset,
                                                   std::optional<std::size_t> limit)
@@ -1603,20 +1684,21 @@ View DocumentEngine::query(ListHandle list, const QuerySpec &spec) const
     _impl->schema.validate(list);
     validateQuerySpec(_impl->schema, list.containerId(), spec);
     auto *engine = _impl.get();
-    auto data = SharedDataPointer<View::Impl>(new View::Impl(nullptr, [engine, list, spec]() {
+    const auto normalizedSpec = normalizedQuerySpec(_impl->schema, list.containerId(), spec);
+    auto data = SharedDataPointer<View::Impl>(new View::Impl(nullptr, [engine, list, normalizedSpec]() {
         std::vector<ItemSnapshot> result;
-        executeQueryResults(*engine, list.containerId(), spec, true, [&](const ItemSnapshot &item) {
+        executeQueryResults(*engine, list.containerId(), normalizedSpec, true, [&](const ItemSnapshot &item) {
             result.push_back(item);
             return true;
         });
         return result;
     }, _impl->schema, list.containerId()));
-    data.data()->streamer = [engine, list, spec](const std::function<bool(const ItemSnapshot &)> &visitor,
-                                                 std::size_t offset,
-                                                 std::optional<std::size_t> limit) {
-        executeQueryResults(*engine, list.containerId(), spec, true, visitor, offset, limit);
+    data.data()->streamer = [engine, list, normalizedSpec](const std::function<bool(const ItemSnapshot &)> &visitor,
+                                                           std::size_t offset,
+                                                           std::optional<std::size_t> limit) {
+        executeQueryResults(*engine, list.containerId(), normalizedSpec, true, visitor, offset, limit);
     };
-    if (spec.filter.isEmpty()) {
+    if (normalizedSpec.filter.isEmpty()) {
         data.data()->aggregator = [engine, list](const AggregationSpec &aggregate,
                                                  std::size_t offset,
                                                  std::optional<std::size_t> limit)
