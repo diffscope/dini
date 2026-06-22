@@ -16,8 +16,16 @@ struct View::Impl : SharedData {
 
     Decl *_decl = nullptr;
     std::function<std::vector<ItemSnapshot>()> evaluator;
+    std::function<void(const std::function<bool(const ItemSnapshot &)> &,
+                       std::size_t,
+                       std::optional<std::size_t>)> streamer;
+    std::function<std::optional<std::vector<AggregationResult>>(const AggregationSpec &,
+                                                                 std::size_t,
+                                                                 std::optional<std::size_t>)> aggregator;
     EngineSchema schema;
     std::optional<ContainerId> containerId;
+    std::size_t offset = 0;
+    std::optional<std::size_t> limit;
 
     Impl() = default;
     explicit Impl(Decl *decl) : _decl(decl) {}

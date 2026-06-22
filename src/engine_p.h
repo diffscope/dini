@@ -15,6 +15,7 @@
 
 #include "event_p.h"
 #include "schema_p.h"
+#include "support/runtime_index.h"
 
 namespace dini {
 
@@ -22,21 +23,11 @@ struct RuntimeItem {
     ItemSnapshot snapshot;
 };
 
-struct RuntimeIndexKey {
-    ContainerId containerId = 0;
-    ColumnId columnId = 0;
-
-    friend bool operator<(const RuntimeIndexKey &lhs, const RuntimeIndexKey &rhs) noexcept
-    {
-        return std::tie(lhs.containerId, lhs.columnId) < std::tie(rhs.containerId, rhs.columnId);
-    }
-};
-
 struct DocumentEngine::Impl {
     EngineSchema schema;
     std::unordered_map<ItemId, RuntimeItem> items;
     std::map<std::pair<ContainerId, std::string>, std::vector<ItemId>> listGroups;
-    std::map<RuntimeIndexKey, std::map<std::string, std::set<ItemId>>> columnIndexes;
+    RuntimeIndexStore indexes;
     std::vector<UndoStep> undoStack;
     std::vector<UndoStep> redoStack;
     std::vector<std::weak_ptr<SubscriptionState>> subscriptions;
@@ -59,7 +50,7 @@ struct Transaction::Impl {
     ChangeSet changeSet;
     std::unordered_map<ItemId, RuntimeItem> rollbackItems;
     std::map<std::pair<ContainerId, std::string>, std::vector<ItemId>> rollbackListGroups;
-    std::map<RuntimeIndexKey, std::map<std::string, std::set<ItemId>>> rollbackColumnIndexes;
+    RuntimeIndexStore rollbackIndexes;
     bool rollbackApplied = false;
 };
 

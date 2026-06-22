@@ -8,6 +8,7 @@ project(dini VERSION 0.0.1.0 LANGUAGES C CXX)
 option(DINI_BUILD_STATIC "Build static library" OFF)
 option(DINI_INSTALL "Install library" ON)
 option(DINI_BUILD_TESTS "Build unit tests" OFF)
+option(DINI_BUILD_BENCHMARKS "Build benchmark targets" OFF)
 
 # ----------------------------------
 # CMake Settings
@@ -95,9 +96,16 @@ if (WIN32)
     )
 endif ()
 
-if (DINI_BUILD_TESTS)
+if (DINI_BUILD_TESTS OR DINI_BUILD_BENCHMARKS)
     enable_testing()
+endif ()
+
+if (DINI_BUILD_TESTS)
     add_subdirectory(tests)
+endif ()
+
+if (DINI_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
 endif ()
 
 if (DINI_INSTALL)

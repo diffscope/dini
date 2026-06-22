@@ -353,6 +353,26 @@ View View::sort(std::vector<SortKey> keys) const
     }, schema, containerId.value_or(0))));
 }
 
+View View::limit(std::size_t count) const
+{
+    __stdc_impl_t;
+    auto data = SharedDataPointer<View::Impl>(new View::Impl(impl));
+    data.data()->_decl = nullptr;
+    data.data()->limit = data.constData()->limit
+        ? std::min(*data.constData()->limit, count)
+        : std::optional<std::size_t>(count);
+    return View(std::move(data));
+}
+
+View View::offset(std::size_t count) const
+{
+    __stdc_impl_t;
+    auto data = SharedDataPointer<View::Impl>(new View::Impl(impl));
+    data.data()->_decl = nullptr;
+    data.data()->offset += count;
+    return View(std::move(data));
+}
+
 AggregationView View::aggregate(const AggregationSpec &spec) const
 {
     __stdc_impl_t;
@@ -362,7 +382,15 @@ AggregationView View::aggregate(const AggregationSpec &spec) const
         validateAggregationSpec(schema, *containerId, spec);
     }
     auto source = *this;
-    return AggregationView(SharedDataPointer<AggregationView::Impl>(new AggregationView::Impl(nullptr, [source, spec, schema, containerId]() {
+    const auto offset = impl.offset;
+    const auto limit = impl.limit;
+    const auto aggregator = impl.aggregator;
+    return AggregationView(SharedDataPointer<AggregationView::Impl>(new AggregationView::Impl(nullptr, [source, spec, schema, containerId, offset, limit, aggregator]() {
+        if (aggregator) {
+            if (auto indexed = aggregator(spec, offset, limit)) {
+                return *indexed;
+            }
+        }
         auto items = source.toVector();
         const auto *schemaDefinition = containerId ? &schemaData(schema) : nullptr;
         std::map<std::string, AggregationResult> rows;
@@ -418,11 +446,40 @@ AggregationView View::aggregate(const AggregationSpec &spec) const
 std::vector<ItemSnapshot> View::toVector() const
 {
     __stdc_impl_t;
-    return impl.evaluator ? impl.evaluator() : std::vector<ItemSnapshot> {};
+    if (impl.streamer) {
+        std::vector<ItemSnapshot> items;
+        impl.streamer([&](const ItemSnapshot &item) {
+            items.push_back(item);
+            return true;
+        }, impl.offset, impl.limit);
+        return items;
+    }
+    auto items = impl.evaluator ? impl.evaluator() : std::vector<ItemSnapshot> {};
+    if (impl.offset == 0 && !impl.limit) {
+        return items;
+    }
+    if (impl.offset >= items.size()) {
+        return {};
+    }
+    const auto begin = items.begin() + static_cast<std::ptrdiff_t>(impl.offset);
+    auto end = items.end();
+    if (impl.limit) {
+        const auto count = std::min(*impl.limit, static_cast<std::size_t>(std::distance(begin, end)));
+        end = begin + static_cast<std::ptrdiff_t>(count);
+    }
+    return std::vector<ItemSnapshot>(begin, end);
 }
 
 void View::forEach(const std::function<void(const ItemSnapshot &)> &visitor) const
 {
+    __stdc_impl_t;
+    if (impl.streamer) {
+        impl.streamer([&](const ItemSnapshot &item) {
+            visitor(item);
+            return true;
+        }, impl.offset, impl.limit);
+        return;
+    }
     for (const auto &item : toVector()) {
         visitor(item);
     }
@@ -430,11 +487,29 @@ void View::forEach(const std::function<void(const ItemSnapshot &)> &visitor) con
 
 std::size_t View::count() const
 {
+    __stdc_impl_t;
+    if (impl.streamer) {
+        std::size_t result = 0;
+        impl.streamer([&](const ItemSnapshot &) {
+            ++result;
+            return true;
+        }, impl.offset, impl.limit);
+        return result;
+    }
     return toVector().size();
 }
 
 bool View::empty() const
 {
+    __stdc_impl_t;
+    if (impl.streamer) {
+        bool emptyResult = true;
+        impl.streamer([&](const ItemSnapshot &) {
+            emptyResult = false;
+            return false;
+        }, impl.offset, std::size_t {1});
+        return emptyResult;
+    }
     return count() == 0;
 }
 

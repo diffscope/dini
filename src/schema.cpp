@@ -53,6 +53,22 @@ namespace dini {
         }
     }
 
+    bool typeSupportsRangeMaintenance(ValueType type) noexcept
+    {
+        return type == ValueType::Int64 || type == ValueType::UInt64 || type == ValueType::Double;
+    }
+
+    AggregateIndexOptions aggregateOptionsFor(const ColumnDefinitionRecord &column)
+    {
+        if (column.info.computed) {
+            return column.computedDefinition.aggregateIndex;
+        }
+        if (column.info.variantSpecific) {
+            return column.variantDefinition.aggregateIndex;
+        }
+        return column.normalDefinition.aggregateIndex;
+    }
+
     ColumnHandle addColumnRecord(SchemaBuilder::Impl *builder,
                                  ContainerDefinitionRecord &container,
                                  ColumnDefinitionRecord record)
@@ -104,11 +120,31 @@ namespace dini {
                         throw SchemaError("variant-specific column references an unknown variant");
                     }
                 }
+                const auto aggregate = aggregateOptionsFor(column);
+                if ((aggregate.sum || aggregate.minMax) && !typeSupportsRangeMaintenance(column.info.type)) {
+                    throw SchemaError("aggregate index hints require a numeric column");
+                }
             }
             for (const auto &relation : container.relations) {
                 validateAssociationTarget(data, relation.info.target);
                 if (!findColumn(data, container.info.id, relation.info.column.columnId())) {
                     throw SchemaError("relation storage column does not belong to its container");
+                }
+            }
+            for (const auto &rangeIndex : container.rangeIndexes) {
+                if (rangeIndex.columns.size() < 2) {
+                    throw SchemaError("range index must contain at least two columns");
+                }
+                for (const auto &columnHandle : rangeIndex.columns) {
+                    if (!columnHandle.isValid() ||
+                        columnHandle.schemaId() != data.schemaId ||
+                        columnHandle.containerId() != container.info.id) {
+                        throw SchemaError("range index column must belong to its container");
+                    }
+                    const auto *column = findColumn(data, container.info.id, columnHandle.columnId());
+                    if (!column || column->info.index == IndexKind::None || !typeSupportsRangeMaintenance(column->info.type)) {
+                        throw SchemaError("range index columns must be indexed numeric columns");
+                    }
                 }
             }
         }
@@ -469,6 +505,15 @@ void TableBuilder::addHook(const HookDefinition &definition)
     requireContainer(_impl ? _impl->builder : nullptr, _impl ? _impl->containerId : 0).hooks.push_back(definition);
 }
 
+void TableBuilder::addRangeIndex(const RangeIndexDefinition &definition)
+{
+    auto &container = requireContainer(_impl ? _impl->builder : nullptr, _impl ? _impl->containerId : 0);
+    RangeIndexDefinitionRecord record;
+    record.debugName = definition.debugName;
+    record.columns = definition.columns;
+    container.rangeIndexes.push_back(std::move(record));
+}
+
 ListBuilder::ListBuilder() = default;
 ListBuilder::~ListBuilder() = default;
 ListBuilder::ListBuilder(ListBuilder &&other) noexcept = default;
@@ -551,6 +596,15 @@ void ListBuilder::addHook(const HookDefinition &definition)
     builder._impl->builder = _impl ? _impl->builder : nullptr;
     builder._impl->containerId = _impl ? _impl->containerId : 0;
     builder.addHook(definition);
+}
+
+void ListBuilder::addRangeIndex(const RangeIndexDefinition &definition)
+{
+    TableBuilder builder;
+    builder._impl = std::make_unique<TableBuilder::Impl>();
+    builder._impl->builder = _impl ? _impl->builder : nullptr;
+    builder._impl->containerId = _impl ? _impl->containerId : 0;
+    builder.addRangeIndex(definition);
 }
 
 } // namespace dini

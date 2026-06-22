@@ -29,11 +29,17 @@ struct VariantDefinitionRecord {
     std::string debugName;
 };
 
+struct RangeIndexDefinitionRecord {
+    std::string debugName;
+    std::vector<ColumnHandle> columns;
+};
+
 struct ContainerDefinitionRecord {
     ContainerInfo info;
     std::vector<ColumnDefinitionRecord> columns;
     std::vector<RelationDefinitionRecord> relations;
     std::vector<VariantDefinitionRecord> variants;
+    std::vector<RangeIndexDefinitionRecord> rangeIndexes;
     std::vector<HookDefinition> hooks;
     std::optional<RelationId> listAssociation;
 };

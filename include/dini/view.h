@@ -98,6 +98,24 @@ public:
     View sort(std::vector<SortKey> keys) const;
 
     /**
+     * @brief Returns a new view capped to at most count result items.
+     *
+     * @param count Maximum number of items to expose from this view.
+     * @pre None.
+     * @post The original view is unchanged; the returned view remains live.
+     */
+    View limit(std::size_t count) const;
+
+    /**
+     * @brief Returns a new view that skips the first count result items.
+     *
+     * @param count Number of result items to skip.
+     * @pre None.
+     * @post The original view is unchanged; the returned view remains live.
+     */
+    View offset(std::size_t count) const;
+
+    /**
      * @brief Creates a live aggregation view.
      *
      * @param spec Aggregation specification.

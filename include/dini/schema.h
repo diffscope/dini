@@ -25,6 +25,19 @@ class TableBuilder;
 class TransactionContext;
 
 /**
+ * @brief Optional aggregate maintenance hints for a column.
+ *
+ * Hinted aggregate indexes are maintained on writes and may be used by
+ * aggregation views. Leaving all flags false preserves the default fallback
+ * behavior with no additional write-time maintenance.
+ */
+struct DINI_EXPORT AggregateIndexOptions {
+    bool sum = false;
+    bool minMax = false;
+    bool byParent = true;
+};
+
+/**
  * @brief Describes a normal stored column.
  *
  * ColumnDefinition is consumed during schema definition only. Once its owning
@@ -39,6 +52,7 @@ struct DINI_EXPORT ColumnDefinition {
     bool nullable = true;
     bool participatesInUniqueWhenNull = false;
     bool volatileData = false;
+    AggregateIndexOptions aggregateIndex;
     std::function<bool(const Value &)> check;
 };
 
@@ -55,6 +69,7 @@ struct DINI_EXPORT ComputedColumnDefinition {
     IndexKind index = IndexKind::None;
     bool nullable = true;
     bool volatileData = false;
+    AggregateIndexOptions aggregateIndex;
     std::vector<ColumnHandle> dependsOn;
     std::function<Value(const std::vector<Value> &)> compute;
 };
@@ -80,6 +95,18 @@ struct DINI_EXPORT AssociationDefinition {
 };
 
 /**
+ * @brief Declares a maintained multi-column range index for one container.
+ *
+ * Range indexes are explicit because maintaining kd-tree data adds update cost.
+ * Queries whose range predicates are covered by one declaration may use the
+ * maintained range index; otherwise they fall back to scalar indexes.
+ */
+struct DINI_EXPORT RangeIndexDefinition {
+    std::string debugName;
+    std::vector<ColumnHandle> columns;
+};
+
+/**
  * @brief Describes a column that is valid only for one polymorphic variant.
  *
  * Reading or writing the column for an item of another variant is rejected by
@@ -94,6 +121,7 @@ struct DINI_EXPORT VariantColumnDefinition {
     std::optional<Value> defaultValue;
     bool nullable = true;
     bool volatileData = false;
+    AggregateIndexOptions aggregateIndex;
     std::function<bool(const Value &)> check;
 };
 
@@ -567,6 +595,16 @@ public:
     ColumnHandle addVariantColumn(const VariantColumnDefinition &definition);
 
     /**
+     * @brief Declares a maintained multi-column range index for this table.
+     *
+     * @param definition Range index name and indexed columns.
+     * @pre All columns must belong to this table, be indexed, and use numeric ordering.
+     * @post Matching range AND queries may use the maintained range index.
+     * @throws SchemaError if the declaration is invalid or the schema is frozen.
+     */
+    void addRangeIndex(const RangeIndexDefinition &definition);
+
+    /**
      * @brief Registers a hook on this table.
      *
      * @param definition Hook stage and callback.
@@ -720,6 +758,16 @@ public:
      * @throws SchemaError if the variant or definition is invalid.
      */
     ColumnHandle addVariantColumn(const VariantColumnDefinition &definition);
+
+    /**
+     * @brief Declares a maintained multi-column range index for this list.
+     *
+     * @param definition Range index name and indexed columns.
+     * @pre All columns must belong to this list, be indexed, and use numeric ordering.
+     * @post Matching range AND queries may use the maintained range index.
+     * @throws SchemaError if the declaration is invalid or the schema is frozen.
+     */
+    void addRangeIndex(const RangeIndexDefinition &definition);
 
     /**
      * @brief Registers a hook on this list.

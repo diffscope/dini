@@ -1,5 +1,9 @@
 #include <cstdint>
+#include <algorithm>
+#include <map>
 #include <memory>
+#include <string>
+#include <tuple>
 #include <vector>
 
 #include <dini/engine.h>
@@ -268,6 +272,239 @@ bool containsId(const std::vector<ItemSnapshot> &results, ItemId id)
         }
     }
     return false;
+}
+
+struct HintContext {
+    EngineSchema schema;
+    std::unique_ptr<DocumentEngine> engine;
+    TableHandle parentTable;
+    ColumnHandle parentKey;
+    TableHandle childTable;
+    RelationHandle childParent;
+    ColumnHandle childX;
+    ColumnHandle childY;
+    ColumnHandle childAmount;
+    ColumnHandle childScore;
+    std::vector<ItemId> parentIds;
+    std::vector<ItemId> childIds;
+};
+
+struct HintRow {
+    std::int64_t parentKey = -1;
+    std::int64_t x = 0;
+    std::int64_t y = 0;
+    std::int64_t amount = 0;
+    double score = 0.0;
+
+    friend bool operator<(const HintRow &lhs, const HintRow &rhs)
+    {
+        return std::tie(lhs.parentKey, lhs.x, lhs.y, lhs.amount, lhs.score) <
+               std::tie(rhs.parentKey, rhs.x, rhs.y, rhs.amount, rhs.score);
+    }
+
+    friend bool operator==(const HintRow &lhs, const HintRow &rhs)
+    {
+        return std::tie(lhs.parentKey, lhs.x, lhs.y, lhs.amount, lhs.score) ==
+               std::tie(rhs.parentKey, rhs.x, rhs.y, rhs.amount, rhs.score);
+    }
+};
+
+ColumnDefinition aggregateHintedInt64Column(const char *debugName, bool aggregateHint)
+{
+    auto definition = int64Column(debugName, IndexKind::Normal);
+    if (aggregateHint) {
+        definition.aggregateIndex = AggregateIndexOptions {
+            .sum = true,
+            .minMax = true,
+            .byParent = true,
+        };
+    }
+    return definition;
+}
+
+ColumnDefinition aggregateHintedDoubleColumn(const char *debugName, bool aggregateHint)
+{
+    auto definition = doubleColumn(debugName, IndexKind::Normal);
+    if (aggregateHint) {
+        definition.aggregateIndex = AggregateIndexOptions {
+            .sum = true,
+            .minMax = true,
+            .byParent = true,
+        };
+    }
+    return definition;
+}
+
+HintContext createHintContext(bool hints)
+{
+    HintContext ctx;
+
+    SchemaBuilder builder;
+    auto parent = builder.createTable("HintParent");
+    ctx.parentTable = parent.handle();
+    ctx.parentKey = parent.addColumn(int64Column("key", IndexKind::Normal));
+
+    auto child = builder.createTable("HintChild");
+    ctx.childTable = child.handle();
+    ctx.childParent = child.addAssociation(AssociationDefinition {
+        .debugName = "parent",
+        .target = ctx.parentTable,
+    });
+    ctx.childX = child.addColumn(int64Column("x", IndexKind::Normal));
+    ctx.childY = child.addColumn(int64Column("y", IndexKind::Normal));
+    ctx.childAmount = child.addColumn(aggregateHintedInt64Column("amount", hints));
+    ctx.childScore = child.addColumn(aggregateHintedDoubleColumn("score", hints));
+    if (hints) {
+        child.addRangeIndex(RangeIndexDefinition {
+            .debugName = "xy",
+            .columns = {ctx.childX, ctx.childY},
+        });
+    }
+
+    ctx.schema = builder.freeze();
+    ctx.engine = std::make_unique<DocumentEngine>(ctx.schema);
+
+    auto txn = ctx.engine->beginTransaction();
+    for (const auto key : {std::int64_t {10}, std::int64_t {20}, std::int64_t {30}}) {
+        ctx.parentIds.push_back(txn.insert(ctx.parentTable, {
+            ColumnValue {.column = ctx.parentKey, .value = Value(key)},
+        }));
+    }
+
+    auto insertChild = [&](std::optional<std::size_t> parentIndex,
+                           std::int64_t x,
+                           std::int64_t y,
+                           std::int64_t amount,
+                           double score) {
+        std::vector<ColumnValue> values {
+            ColumnValue {
+                .column = ctx.childParent.column(),
+                .value = parentIndex ? idValue(ctx.parentIds[*parentIndex]) : Value::null(),
+            },
+            ColumnValue {.column = ctx.childX, .value = Value(x)},
+            ColumnValue {.column = ctx.childY, .value = Value(y)},
+            ColumnValue {.column = ctx.childAmount, .value = Value(amount)},
+            ColumnValue {.column = ctx.childScore, .value = Value(score)},
+        };
+        ctx.childIds.push_back(txn.insert(ctx.childTable, std::move(values)));
+    };
+
+    insertChild(0, -10, 100, 5, 1.5);
+    insertChild(0, 0, 50, 7, 9.0);
+    insertChild(1, 10, 20, -3, 2.5);
+    insertChild(1, 20, 10, 12, 2.5);
+    insertChild(2, 30, 0, 0, -1.0);
+    insertChild(2, 40, -10, 18, 8.0);
+    insertChild(std::nullopt, 50, -20, 4, 3.5);
+    txn.commit();
+
+    return ctx;
+}
+
+std::int64_t parentBusinessKey(const HintContext &ctx, const Value &parentValue)
+{
+    if (parentValue.isNull()) {
+        return -1;
+    }
+    return ctx.engine->read(static_cast<ItemId>(parentValue.asUInt64()), ctx.parentKey).asInt64();
+}
+
+std::vector<HintRow> queryRows(const HintContext &ctx, const QuerySpec &spec)
+{
+    auto snapshots = ctx.engine->query(ctx.childTable, spec).toVector();
+    std::vector<HintRow> rows;
+    rows.reserve(snapshots.size());
+    for (const auto &snapshot : snapshots) {
+        const auto parentValue = ctx.engine->read(snapshot.id, ctx.childParent.column());
+        rows.push_back(HintRow {
+            .parentKey = parentBusinessKey(ctx, parentValue),
+            .x = ctx.engine->read(snapshot.id, ctx.childX).asInt64(),
+            .y = ctx.engine->read(snapshot.id, ctx.childY).asInt64(),
+            .amount = ctx.engine->read(snapshot.id, ctx.childAmount).asInt64(),
+            .score = ctx.engine->read(snapshot.id, ctx.childScore).asDouble(),
+        });
+    }
+    std::sort(rows.begin(), rows.end());
+    return rows;
+}
+
+Value ungroupedAggregateValue(const HintContext &ctx, const AggregationSpec &spec)
+{
+    auto rows = ctx.engine->view(ctx.childTable).aggregate(spec).toVector();
+    EXPECT_EQ(rows.size(), 1U);
+    return rows.empty() ? Value::null() : rows.front().value;
+}
+
+std::map<std::int64_t, Value> parentAggregateRows(const HintContext &ctx, const AggregationSpec &spec)
+{
+    auto rows = ctx.engine->view(ctx.childTable).aggregate(spec).toVector();
+    std::map<std::int64_t, Value> result;
+    for (const auto &row : rows) {
+        result[parentBusinessKey(ctx, row.groupKey.value_or(Value::null()))] = row.value;
+    }
+    return result;
+}
+
+void expectSameValue(const Value &lhs, const Value &rhs)
+{
+    EXPECT_TRUE(lhs == rhs);
+}
+
+void expectSameParentAggregates(const HintContext &fallback, const HintContext &hinted)
+{
+    const std::vector<AggregationSpec> specs {
+        AggregationSpec {
+            .kind = AggregateKind::Count,
+            .groupBy = FieldRef::parent(fallback.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Sum,
+            .valueField = FieldRef::column(fallback.childAmount),
+            .groupBy = FieldRef::parent(fallback.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Minimum,
+            .valueField = FieldRef::column(fallback.childScore),
+            .groupBy = FieldRef::parent(fallback.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Maximum,
+            .valueField = FieldRef::column(fallback.childScore),
+            .groupBy = FieldRef::parent(fallback.childParent),
+        },
+    };
+    const std::vector<AggregationSpec> hintedSpecs {
+        AggregationSpec {
+            .kind = AggregateKind::Count,
+            .groupBy = FieldRef::parent(hinted.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Sum,
+            .valueField = FieldRef::column(hinted.childAmount),
+            .groupBy = FieldRef::parent(hinted.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Minimum,
+            .valueField = FieldRef::column(hinted.childScore),
+            .groupBy = FieldRef::parent(hinted.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Maximum,
+            .valueField = FieldRef::column(hinted.childScore),
+            .groupBy = FieldRef::parent(hinted.childParent),
+        },
+    };
+
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        const auto fallbackRows = parentAggregateRows(fallback, specs[i]);
+        const auto hintedRows = parentAggregateRows(hinted, hintedSpecs[i]);
+        ASSERT_EQ(fallbackRows.size(), hintedRows.size());
+        for (const auto &[key, value] : fallbackRows) {
+            auto hintedIt = hintedRows.find(key);
+            ASSERT_NE(hintedIt, hintedRows.end());
+            expectSameValue(value, hintedIt->second);
+        }
+    }
 }
 
 TEST(DocumentEngineQueryTest, QueryAllComparisonOperators)
@@ -757,6 +994,181 @@ TEST(DocumentEngineQueryTest, AggregateGroupByParent)
         ASSERT_TRUE(row.groupKey.has_value());
         EXPECT_EQ(row.value.asUInt64(), 2U);
     }
+}
+
+TEST(DocumentEngineQueryTest, QueryRangeHintAndFallbackReturnSameResults)
+{
+    auto fallback = createHintContext(false);
+    auto hinted = createHintContext(true);
+
+    auto makeAnd = [](ColumnHandle x, ColumnHandle y, ComparisonOperator xOp, Value xValue,
+                      ComparisonOperator yOp, Value yValue) {
+        return QuerySpec {
+            .filter = FilterExpression::all({
+                FilterExpression(Filter(FieldRef::column(x), xOp, std::move(xValue))),
+                FilterExpression(Filter(FieldRef::column(y), yOp, std::move(yValue))),
+            }),
+        };
+    };
+
+    const auto fallbackAnd = makeAnd(fallback.childX,
+                                     fallback.childY,
+                                     ComparisonOperator::Greater,
+                                     Value(std::int64_t {0}),
+                                     ComparisonOperator::Less,
+                                     Value(std::int64_t {20}));
+    const auto hintedAnd = makeAnd(hinted.childX,
+                                   hinted.childY,
+                                   ComparisonOperator::Greater,
+                                   Value(std::int64_t {0}),
+                                   ComparisonOperator::Less,
+                                   Value(std::int64_t {20}));
+    EXPECT_EQ(queryRows(fallback, fallbackAnd), queryRows(hinted, hintedAnd));
+
+    const auto fallbackClosed = makeAnd(fallback.childX,
+                                        fallback.childY,
+                                        ComparisonOperator::GreaterOrEqual,
+                                        Value(std::int64_t {0}),
+                                        ComparisonOperator::LessOrEqual,
+                                        Value(std::int64_t {20}));
+    const auto hintedClosed = makeAnd(hinted.childX,
+                                      hinted.childY,
+                                      ComparisonOperator::GreaterOrEqual,
+                                      Value(std::int64_t {0}),
+                                      ComparisonOperator::LessOrEqual,
+                                      Value(std::int64_t {20}));
+    EXPECT_EQ(queryRows(fallback, fallbackClosed), queryRows(hinted, hintedClosed));
+
+    const QuerySpec fallbackNegated {
+        .filter = FilterExpression::negate(fallbackAnd.filter),
+    };
+    const QuerySpec hintedNegated {
+        .filter = FilterExpression::negate(hintedAnd.filter),
+    };
+    EXPECT_EQ(queryRows(fallback, fallbackNegated), queryRows(hinted, hintedNegated));
+
+    const QuerySpec fallbackMixed {
+        .filter = FilterExpression::any({
+            FilterExpression::all({
+                FilterExpression(Filter(FieldRef::column(fallback.childX),
+                                        ComparisonOperator::Less,
+                                        Value(std::int64_t {0}))),
+                FilterExpression(Filter(FieldRef::column(fallback.childY),
+                                        ComparisonOperator::Greater,
+                                        Value(std::int64_t {90}))),
+            }),
+            FilterExpression::all({
+                FilterExpression(Filter(FieldRef::column(fallback.childX),
+                                        ComparisonOperator::Greater,
+                                        Value(std::int64_t {35}))),
+                FilterExpression(Filter(FieldRef::column(fallback.childAmount),
+                                        ComparisonOperator::GreaterOrEqual,
+                                        Value(std::int64_t {4}))),
+            }),
+        }),
+    };
+    const QuerySpec hintedMixed {
+        .filter = FilterExpression::any({
+            FilterExpression::all({
+                FilterExpression(Filter(FieldRef::column(hinted.childX),
+                                        ComparisonOperator::Less,
+                                        Value(std::int64_t {0}))),
+                FilterExpression(Filter(FieldRef::column(hinted.childY),
+                                        ComparisonOperator::Greater,
+                                        Value(std::int64_t {90}))),
+            }),
+            FilterExpression::all({
+                FilterExpression(Filter(FieldRef::column(hinted.childX),
+                                        ComparisonOperator::Greater,
+                                        Value(std::int64_t {35}))),
+                FilterExpression(Filter(FieldRef::column(hinted.childAmount),
+                                        ComparisonOperator::GreaterOrEqual,
+                                        Value(std::int64_t {4}))),
+            }),
+        }),
+    };
+    EXPECT_EQ(queryRows(fallback, fallbackMixed), queryRows(hinted, hintedMixed));
+}
+
+TEST(DocumentEngineQueryTest, AggregateHintAndFallbackReturnSameUngroupedResults)
+{
+    auto fallback = createHintContext(false);
+    auto hinted = createHintContext(true);
+
+    const std::vector<AggregationSpec> fallbackSpecs {
+        AggregationSpec {.kind = AggregateKind::Count},
+        AggregationSpec {.kind = AggregateKind::Sum, .valueField = FieldRef::column(fallback.childAmount)},
+        AggregationSpec {.kind = AggregateKind::Minimum, .valueField = FieldRef::column(fallback.childScore)},
+        AggregationSpec {.kind = AggregateKind::Maximum, .valueField = FieldRef::column(fallback.childScore)},
+    };
+    const std::vector<AggregationSpec> hintedSpecs {
+        AggregationSpec {.kind = AggregateKind::Count},
+        AggregationSpec {.kind = AggregateKind::Sum, .valueField = FieldRef::column(hinted.childAmount)},
+        AggregationSpec {.kind = AggregateKind::Minimum, .valueField = FieldRef::column(hinted.childScore)},
+        AggregationSpec {.kind = AggregateKind::Maximum, .valueField = FieldRef::column(hinted.childScore)},
+    };
+
+    for (std::size_t i = 0; i < fallbackSpecs.size(); ++i) {
+        expectSameValue(ungroupedAggregateValue(fallback, fallbackSpecs[i]),
+                        ungroupedAggregateValue(hinted, hintedSpecs[i]));
+    }
+}
+
+TEST(DocumentEngineQueryTest, AggregateHintAndFallbackReturnSameParentGroupedResults)
+{
+    auto fallback = createHintContext(false);
+    auto hinted = createHintContext(true);
+
+    expectSameParentAggregates(fallback, hinted);
+}
+
+TEST(DocumentEngineQueryTest, AggregateHintsStayConsistentAfterMutations)
+{
+    auto fallback = createHintContext(false);
+    auto hinted = createHintContext(true);
+
+    auto insertExtra = [](HintContext &ctx) {
+        auto txn = ctx.engine->beginTransaction();
+        ctx.childIds.push_back(txn.insert(ctx.childTable, {
+            ColumnValue {.column = ctx.childParent.column(), .value = idValue(ctx.parentIds[0])},
+            ColumnValue {.column = ctx.childX, .value = Value(std::int64_t {60})},
+            ColumnValue {.column = ctx.childY, .value = Value(std::int64_t {-60})},
+            ColumnValue {.column = ctx.childAmount, .value = Value(std::int64_t {11})},
+            ColumnValue {.column = ctx.childScore, .value = Value(11.5)},
+        }));
+        txn.commit();
+    };
+    insertExtra(fallback);
+    insertExtra(hinted);
+    expectSameParentAggregates(fallback, hinted);
+
+    auto updateValues = [](HintContext &ctx) {
+        auto txn = ctx.engine->beginTransaction();
+        txn.update(ctx.childIds[0], ctx.childAmount, Value(std::int64_t {15}));
+        txn.update(ctx.childIds[0], ctx.childScore, Value(-2.0));
+        txn.commit();
+    };
+    updateValues(fallback);
+    updateValues(hinted);
+    expectSameParentAggregates(fallback, hinted);
+
+    auto reassignParent = [](HintContext &ctx) {
+        auto txn = ctx.engine->beginTransaction();
+        txn.update(ctx.childIds[1], ctx.childParent.column(), idValue(ctx.parentIds[2]));
+        txn.commit();
+    };
+    reassignParent(fallback);
+    reassignParent(hinted);
+    expectSameParentAggregates(fallback, hinted);
+
+    auto removeChild = [](HintContext &ctx) {
+        auto txn = ctx.engine->beginTransaction();
+        txn.remove(ctx.childIds[3]);
+        txn.commit();
+    };
+    removeChild(fallback);
+    removeChild(hinted);
+    expectSameParentAggregates(fallback, hinted);
 }
 
 TEST(DocumentEngineQueryTest, ViewFilterChaining)
