@@ -1218,6 +1218,80 @@ namespace dini {
         return std::nullopt;
     }
 
+    struct ParentSelection {
+        ColumnId relationColumnId = 0;
+        std::vector<Value> values;
+    };
+
+    void appendUniqueValue(std::vector<Value> &values, const Value &value)
+    {
+        const auto exists = std::any_of(values.begin(), values.end(), [&](const auto &candidate) {
+            return compareValues(candidate, value) == 0;
+        });
+        if (!exists) {
+            values.push_back(value);
+        }
+    }
+
+    std::optional<ParentSelection> parentSelectionForFilter(ContainerId containerId, const Filter &filter)
+    {
+        if (filter.field().kind() != FieldKind::Parent ||
+            filter.comparisonOperator() != ComparisonOperator::Equal) {
+            return std::nullopt;
+        }
+        const auto relationColumn = filter.field().relation().column();
+        if (relationColumn.containerId() != containerId) {
+            return std::nullopt;
+        }
+        ParentSelection selection;
+        selection.relationColumnId = relationColumn.columnId();
+        selection.values.push_back(filter.value());
+        return selection;
+    }
+
+    std::optional<ParentSelection> parentSelectionForExpression(ContainerId containerId,
+                                                                const FilterExpression &expression)
+    {
+        const auto &impl = filterExpressionImpl(expression);
+        if (impl.empty) {
+            return std::nullopt;
+        }
+        if (impl.filter) {
+            return parentSelectionForFilter(containerId, *impl.filter);
+        }
+        if (impl.op != FilterOperator::Or || impl.children.empty()) {
+            return std::nullopt;
+        }
+
+        std::optional<ParentSelection> accumulated;
+        for (const auto &child : impl.children) {
+            auto childSelection = parentSelectionForExpression(containerId, child);
+            if (!childSelection) {
+                return std::nullopt;
+            }
+            if (!accumulated) {
+                accumulated = std::move(childSelection);
+                continue;
+            }
+            if (accumulated->relationColumnId != childSelection->relationColumnId) {
+                return std::nullopt;
+            }
+            for (const auto &value : childSelection->values) {
+                appendUniqueValue(accumulated->values, value);
+            }
+        }
+        return accumulated;
+    }
+
+    std::size_t countWithOffsetLimit(std::size_t total, std::size_t offset, std::optional<std::size_t> limit)
+    {
+        if (offset >= total) {
+            return 0;
+        }
+        const auto remaining = total - offset;
+        return limit ? std::min(*limit, remaining) : remaining;
+    }
+
     std::optional<RuntimeRangeConstraint> rangeConstraintForFilter(const EngineSchema &schema,
                                                                   ContainerId containerId,
                                                                   const Filter &filter)
@@ -1652,6 +1726,7 @@ View DocumentEngine::query(TableHandle table, const QuerySpec &spec) const
     validateQuerySpec(_impl->schema, table.containerId(), spec);
     auto *engine = _impl.get();
     const auto normalizedSpec = normalizedQuerySpec(_impl->schema, table.containerId(), spec);
+    const auto parentSelection = parentSelectionForExpression(table.containerId(), normalizedSpec.filter);
     auto data = SharedDataPointer<View::Impl>(new View::Impl(nullptr, [engine, table, normalizedSpec]() {
         std::vector<ItemSnapshot> result;
         executeQueryResults(*engine, table.containerId(), normalizedSpec, false, [&](const ItemSnapshot &item) {
@@ -1675,6 +1750,29 @@ View DocumentEngine::query(TableHandle table, const QuerySpec &spec) const
             }
             return engine->indexes.aggregate(schemaData(engine->schema), table.containerId(), aggregate);
         };
+    } else if (parentSelection) {
+        data.data()->counter = [engine, table, selection = *parentSelection](
+                                   std::size_t offset,
+                                   std::optional<std::size_t> limit) -> std::optional<std::size_t> {
+            const auto total = engine->indexes.countParent(table.containerId(),
+                                                           selection.relationColumnId,
+                                                           selection.values);
+            return countWithOffsetLimit(total, offset, limit);
+        };
+        data.data()->aggregator = [engine, table, selection = *parentSelection](
+                                      const AggregationSpec &aggregate,
+                                      std::size_t offset,
+                                      std::optional<std::size_t> limit)
+            -> std::optional<std::vector<AggregationResult>> {
+            if (offset != 0 || limit) {
+                return std::nullopt;
+            }
+            return engine->indexes.aggregateParentSelection(schemaData(engine->schema),
+                                                            table.containerId(),
+                                                            selection.relationColumnId,
+                                                            selection.values,
+                                                            aggregate);
+        };
     }
     return View(std::move(data));
 }
@@ -1685,6 +1783,7 @@ View DocumentEngine::query(ListHandle list, const QuerySpec &spec) const
     validateQuerySpec(_impl->schema, list.containerId(), spec);
     auto *engine = _impl.get();
     const auto normalizedSpec = normalizedQuerySpec(_impl->schema, list.containerId(), spec);
+    const auto parentSelection = parentSelectionForExpression(list.containerId(), normalizedSpec.filter);
     auto data = SharedDataPointer<View::Impl>(new View::Impl(nullptr, [engine, list, normalizedSpec]() {
         std::vector<ItemSnapshot> result;
         executeQueryResults(*engine, list.containerId(), normalizedSpec, true, [&](const ItemSnapshot &item) {
@@ -1707,6 +1806,29 @@ View DocumentEngine::query(ListHandle list, const QuerySpec &spec) const
                 return std::nullopt;
             }
             return engine->indexes.aggregate(schemaData(engine->schema), list.containerId(), aggregate);
+        };
+    } else if (parentSelection) {
+        data.data()->counter = [engine, list, selection = *parentSelection](
+                                   std::size_t offset,
+                                   std::optional<std::size_t> limit) -> std::optional<std::size_t> {
+            const auto total = engine->indexes.countParent(list.containerId(),
+                                                           selection.relationColumnId,
+                                                           selection.values);
+            return countWithOffsetLimit(total, offset, limit);
+        };
+        data.data()->aggregator = [engine, list, selection = *parentSelection](
+                                      const AggregationSpec &aggregate,
+                                      std::size_t offset,
+                                      std::optional<std::size_t> limit)
+            -> std::optional<std::vector<AggregationResult>> {
+            if (offset != 0 || limit) {
+                return std::nullopt;
+            }
+            return engine->indexes.aggregateParentSelection(schemaData(engine->schema),
+                                                            list.containerId(),
+                                                            selection.relationColumnId,
+                                                            selection.values,
+                                                            aggregate);
         };
     }
     return View(std::move(data));

@@ -22,6 +22,7 @@ struct View::Impl : SharedData {
     std::function<std::optional<std::vector<AggregationResult>>(const AggregationSpec &,
                                                                  std::size_t,
                                                                  std::optional<std::size_t>)> aggregator;
+    std::function<std::optional<std::size_t>(std::size_t, std::optional<std::size_t>)> counter;
     EngineSchema schema;
     std::optional<ContainerId> containerId;
     std::size_t offset = 0;

@@ -488,6 +488,11 @@ void View::forEach(const std::function<void(const ItemSnapshot &)> &visitor) con
 std::size_t View::count() const
 {
     __stdc_impl_t;
+    if (impl.counter) {
+        if (auto indexed = impl.counter(impl.offset, impl.limit)) {
+            return *indexed;
+        }
+    }
     if (impl.streamer) {
         std::size_t result = 0;
         impl.streamer([&](const ItemSnapshot &) {

@@ -132,9 +132,17 @@ public:
                       bool descending,
                       const std::function<bool(ItemId)> &visitor) const;
     std::size_t countField(const RuntimeIndexedFieldKey &field, ComparisonOperator op, const Value &value) const;
+    std::size_t countParent(ContainerId containerId,
+                            ColumnId relationColumnId,
+                            const std::vector<Value> &parentValues) const;
     std::optional<std::vector<AggregationResult>> aggregate(const SchemaDefinitionData &schemaDefinition,
                                                             ContainerId containerId,
                                                             const AggregationSpec &spec) const;
+    std::optional<std::vector<AggregationResult>> aggregateParentSelection(const SchemaDefinitionData &schemaDefinition,
+                                                                           ContainerId containerId,
+                                                                           ColumnId filterRelationColumnId,
+                                                                           const std::vector<Value> &parentValues,
+                                                                           const AggregationSpec &spec) const;
 
     struct AggregateBucket {
         std::size_t count = 0;

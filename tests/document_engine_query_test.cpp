@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -443,6 +444,37 @@ std::map<std::int64_t, Value> parentAggregateRows(const HintContext &ctx, const 
         result[parentBusinessKey(ctx, row.groupKey.value_or(Value::null()))] = row.value;
     }
     return result;
+}
+
+Value queryUngroupedAggregateValue(const HintContext &ctx, const QuerySpec &query, const AggregationSpec &spec)
+{
+    auto rows = ctx.engine->query(ctx.childTable, query).aggregate(spec).toVector();
+    EXPECT_EQ(rows.size(), 1U);
+    return rows.empty() ? Value::null() : rows.front().value;
+}
+
+std::map<std::int64_t, Value> queryParentAggregateRows(const HintContext &ctx,
+                                                       const QuerySpec &query,
+                                                       const AggregationSpec &spec)
+{
+    auto rows = ctx.engine->query(ctx.childTable, query).aggregate(spec).toVector();
+    std::map<std::int64_t, Value> result;
+    for (const auto &row : rows) {
+        result[parentBusinessKey(ctx, row.groupKey.value_or(Value::null()))] = row.value;
+    }
+    return result;
+}
+
+QuerySpec parentAnyQuery(RelationHandle relation, std::vector<Value> parentValues)
+{
+    std::vector<FilterExpression> children;
+    children.reserve(parentValues.size());
+    for (auto &parentValue : parentValues) {
+        children.push_back(FilterExpression(Filter(FieldRef::parent(relation),
+                                                   ComparisonOperator::Equal,
+                                                   std::move(parentValue))));
+    }
+    return QuerySpec {.filter = FilterExpression::any(std::move(children))};
 }
 
 void expectSameValue(const Value &lhs, const Value &rhs)
@@ -1120,6 +1152,120 @@ TEST(DocumentEngineQueryTest, AggregateHintAndFallbackReturnSameParentGroupedRes
     auto hinted = createHintContext(true);
 
     expectSameParentAggregates(fallback, hinted);
+}
+
+TEST(DocumentEngineQueryTest, ParentExactSelectionCountUsesCorrectSemantics)
+{
+    auto ctx = createHintContext(true);
+    const auto missingParent = Value(std::numeric_limits<std::uint64_t>::max());
+
+    const QuerySpec singleParent {
+        .filter = FilterExpression(Filter(FieldRef::parent(ctx.childParent),
+                                          ComparisonOperator::Equal,
+                                          idValue(ctx.parentIds[0]))),
+    };
+    EXPECT_EQ(ctx.engine->query(ctx.childTable, singleParent).count(), 2U);
+    EXPECT_EQ(ctx.engine->query(ctx.childTable, singleParent).offset(1).count(), 1U);
+    EXPECT_EQ(ctx.engine->query(ctx.childTable, singleParent).offset(3).count(), 0U);
+
+    const auto parentOr = parentAnyQuery(ctx.childParent, {
+        idValue(ctx.parentIds[0]),
+        idValue(ctx.parentIds[1]),
+        idValue(ctx.parentIds[1]),
+    });
+    EXPECT_EQ(ctx.engine->query(ctx.childTable, parentOr).count(), 4U);
+    EXPECT_EQ(ctx.engine->query(ctx.childTable, parentOr).limit(3).count(), 3U);
+    EXPECT_EQ(ctx.engine->query(ctx.childTable, parentOr).offset(3).limit(5).count(), 1U);
+
+    const auto mixedMissing = parentAnyQuery(ctx.childParent, {
+        idValue(ctx.parentIds[2]),
+        missingParent,
+    });
+    EXPECT_EQ(ctx.engine->query(ctx.childTable, mixedMissing).count(), 2U);
+
+    const auto onlyMissing = parentAnyQuery(ctx.childParent, {missingParent});
+    EXPECT_EQ(ctx.engine->query(ctx.childTable, onlyMissing).count(), 0U);
+}
+
+TEST(DocumentEngineQueryTest, FilteredParentAggregateHintsMatchFallback)
+{
+    auto fallback = createHintContext(false);
+    auto hinted = createHintContext(true);
+
+    const auto fallbackQuery = parentAnyQuery(fallback.childParent, {
+        idValue(fallback.parentIds[0]),
+        idValue(fallback.parentIds[1]),
+        idValue(fallback.parentIds[1]),
+    });
+    const auto hintedQuery = parentAnyQuery(hinted.childParent, {
+        idValue(hinted.parentIds[0]),
+        idValue(hinted.parentIds[1]),
+        idValue(hinted.parentIds[1]),
+    });
+
+    const std::vector<AggregationSpec> fallbackUngrouped {
+        AggregationSpec {.kind = AggregateKind::Count},
+        AggregationSpec {.kind = AggregateKind::Sum, .valueField = FieldRef::column(fallback.childAmount)},
+        AggregationSpec {.kind = AggregateKind::Minimum, .valueField = FieldRef::column(fallback.childScore)},
+        AggregationSpec {.kind = AggregateKind::Maximum, .valueField = FieldRef::column(fallback.childScore)},
+    };
+    const std::vector<AggregationSpec> hintedUngrouped {
+        AggregationSpec {.kind = AggregateKind::Count},
+        AggregationSpec {.kind = AggregateKind::Sum, .valueField = FieldRef::column(hinted.childAmount)},
+        AggregationSpec {.kind = AggregateKind::Minimum, .valueField = FieldRef::column(hinted.childScore)},
+        AggregationSpec {.kind = AggregateKind::Maximum, .valueField = FieldRef::column(hinted.childScore)},
+    };
+    for (std::size_t i = 0; i < fallbackUngrouped.size(); ++i) {
+        expectSameValue(queryUngroupedAggregateValue(fallback, fallbackQuery, fallbackUngrouped[i]),
+                        queryUngroupedAggregateValue(hinted, hintedQuery, hintedUngrouped[i]));
+    }
+
+    const std::vector<AggregationSpec> fallbackGrouped {
+        AggregationSpec {.kind = AggregateKind::Count, .groupBy = FieldRef::parent(fallback.childParent)},
+        AggregationSpec {
+            .kind = AggregateKind::Sum,
+            .valueField = FieldRef::column(fallback.childAmount),
+            .groupBy = FieldRef::parent(fallback.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Minimum,
+            .valueField = FieldRef::column(fallback.childScore),
+            .groupBy = FieldRef::parent(fallback.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Maximum,
+            .valueField = FieldRef::column(fallback.childScore),
+            .groupBy = FieldRef::parent(fallback.childParent),
+        },
+    };
+    const std::vector<AggregationSpec> hintedGrouped {
+        AggregationSpec {.kind = AggregateKind::Count, .groupBy = FieldRef::parent(hinted.childParent)},
+        AggregationSpec {
+            .kind = AggregateKind::Sum,
+            .valueField = FieldRef::column(hinted.childAmount),
+            .groupBy = FieldRef::parent(hinted.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Minimum,
+            .valueField = FieldRef::column(hinted.childScore),
+            .groupBy = FieldRef::parent(hinted.childParent),
+        },
+        AggregationSpec {
+            .kind = AggregateKind::Maximum,
+            .valueField = FieldRef::column(hinted.childScore),
+            .groupBy = FieldRef::parent(hinted.childParent),
+        },
+    };
+    for (std::size_t i = 0; i < fallbackGrouped.size(); ++i) {
+        const auto fallbackRows = queryParentAggregateRows(fallback, fallbackQuery, fallbackGrouped[i]);
+        const auto hintedRows = queryParentAggregateRows(hinted, hintedQuery, hintedGrouped[i]);
+        ASSERT_EQ(fallbackRows.size(), hintedRows.size());
+        for (const auto &[key, value] : fallbackRows) {
+            auto hintedIt = hintedRows.find(key);
+            ASSERT_NE(hintedIt, hintedRows.end());
+            expectSameValue(value, hintedIt->second);
+        }
+    }
 }
 
 TEST(DocumentEngineQueryTest, AggregateHintsStayConsistentAfterMutations)

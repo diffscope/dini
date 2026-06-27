@@ -487,10 +487,12 @@ void BM_AggregateQueryParentThenCount(benchmark::State &state)
         .kind = AggregateKind::Count,
         .groupBy = FieldRef::parent(data.itemParent),
     };
-    const auto parent = data.parentIds[3];
-    const auto spec = singleFilter(FieldRef::parent(data.itemParent),
-                                  ComparisonOperator::Equal,
-                                  Value(static_cast<std::uint64_t>(parent)));
+    const auto spec = QuerySpec {
+        .filter = FilterExpression::any({
+            FilterExpression(Filter(FieldRef::parent(data.itemParent), ComparisonOperator::Equal, Value(data.parentIds[3]))),
+            FilterExpression(Filter(FieldRef::parent(data.itemParent), ComparisonOperator::Equal, Value(data.parentIds[4]))),
+        })
+    };
     for (auto _ : state) {
         auto result = data.engine->query(data.itemTable, spec).aggregate(aggregate).toVector();
         benchmark::DoNotOptimize(result);
@@ -536,10 +538,12 @@ void BM_AggregateQueryParentThenSumHinted(benchmark::State &state)
         .valueField = FieldRef::column(data.x),
         .groupBy = FieldRef::parent(data.itemParent),
     };
-    const auto parent = data.parentIds[3];
-    const auto spec = singleFilter(FieldRef::parent(data.itemParent),
-                                  ComparisonOperator::Equal,
-                                  Value(static_cast<std::uint64_t>(parent)));
+    const auto spec = QuerySpec {
+        .filter = FilterExpression::any({
+            FilterExpression(Filter(FieldRef::parent(data.itemParent), ComparisonOperator::Equal, Value(data.parentIds[3]))),
+            FilterExpression(Filter(FieldRef::parent(data.itemParent), ComparisonOperator::Equal, Value(data.parentIds[4]))),
+        })
+    };
     for (auto _ : state) {
         auto result = data.engine->query(data.itemTable, spec).aggregate(aggregate).toVector();
         benchmark::DoNotOptimize(result);

@@ -202,6 +202,29 @@ Value minMaxValue(const RuntimeIndexStore::AggregateBucket &bucket, AggregateKin
     return kind == AggregateKind::Minimum ? bucket.values.begin()->first.value : bucket.values.rbegin()->first.value;
 }
 
+void mergeAggregateBucket(RuntimeIndexStore::AggregateBucket &target,
+                          const RuntimeIndexStore::AggregateBucket &source,
+                          const AggregateIndexOptions &options)
+{
+    target.count += source.count;
+    if (options.sum) {
+        target.sum = sumValues(target.sum, source.sum);
+    }
+    if (options.minMax) {
+        for (const auto &[key, count] : source.values) {
+            target.values[key] += count;
+        }
+    }
+}
+
+Value aggregateBucketValue(const RuntimeIndexStore::AggregateBucket &bucket, AggregateKind kind)
+{
+    if (kind == AggregateKind::Sum) {
+        return bucket.sum;
+    }
+    return minMaxValue(bucket, kind);
+}
+
 bool constraintContains(const RuntimeRangeConstraint &constraint, long double value)
 {
     const auto bound = runtimeNumericValue(constraint.value);
@@ -834,6 +857,28 @@ std::size_t RuntimeIndexStore::countField(const RuntimeIndexedFieldKey &field,
     return it == _scalarIndexes.end() ? 0 : it->second.count(op, value);
 }
 
+std::size_t RuntimeIndexStore::countParent(ContainerId containerId,
+                                           ColumnId relationColumnId,
+                                           const std::vector<Value> &parentValues) const
+{
+    auto containerIt = _parentCounts.find(containerId);
+    if (containerIt == _parentCounts.end()) {
+        return 0;
+    }
+    auto relationIt = containerIt->second.find(relationColumnId);
+    if (relationIt == containerIt->second.end()) {
+        return 0;
+    }
+    std::size_t result = 0;
+    for (const auto &parentValue : parentValues) {
+        auto bucketIt = relationIt->second.find(stableValueKey(parentValue));
+        if (bucketIt != relationIt->second.end()) {
+            result += bucketIt->second.count;
+        }
+    }
+    return result;
+}
+
 std::optional<std::vector<AggregationResult>> RuntimeIndexStore::aggregate(const SchemaDefinitionData &schemaDefinition,
                                                                            ContainerId containerId,
                                                                            const AggregationSpec &spec) const
@@ -918,6 +963,119 @@ std::optional<std::vector<AggregationResult>> RuntimeIndexStore::aggregate(const
         });
     }
     return result;
+}
+
+std::optional<std::vector<AggregationResult>> RuntimeIndexStore::aggregateParentSelection(
+    const SchemaDefinitionData &schemaDefinition,
+    ContainerId containerId,
+    ColumnId filterRelationColumnId,
+    const std::vector<Value> &parentValues,
+    const AggregationSpec &spec) const
+{
+    (void)schemaDefinition;
+    if (spec.groupBy) {
+        if (spec.groupBy->kind() != FieldKind::Parent) {
+            return std::nullopt;
+        }
+        const auto groupRelationColumn = spec.groupBy->relation().column();
+        if (groupRelationColumn.containerId() != containerId ||
+            groupRelationColumn.columnId() != filterRelationColumnId) {
+            return std::nullopt;
+        }
+    }
+
+    auto pushCountRows = [&]() -> std::vector<AggregationResult> {
+        std::vector<AggregationResult> result;
+        auto containerIt = _parentCounts.find(containerId);
+        if (containerIt == _parentCounts.end()) {
+            return result;
+        }
+        auto relationIt = containerIt->second.find(filterRelationColumnId);
+        if (relationIt == containerIt->second.end()) {
+            return result;
+        }
+        result.reserve(parentValues.size());
+        for (const auto &parentValue : parentValues) {
+            auto bucketIt = relationIt->second.find(stableValueKey(parentValue));
+            if (bucketIt == relationIt->second.end()) {
+                continue;
+            }
+            result.push_back(AggregationResult {
+                bucketIt->second.groupValue,
+                Value(static_cast<std::uint64_t>(bucketIt->second.count)),
+            });
+        }
+        return result;
+    };
+
+    if (spec.kind == AggregateKind::Count) {
+        if (spec.groupBy) {
+            return pushCountRows();
+        }
+        const auto total = countParent(containerId, filterRelationColumnId, parentValues);
+        if (total == 0) {
+            return std::nullopt;
+        }
+        return std::vector<AggregationResult> {
+            AggregationResult {std::nullopt, Value(static_cast<std::uint64_t>(total))},
+        };
+    }
+
+    if (!spec.valueField || spec.valueField->kind() != FieldKind::Column) {
+        return std::nullopt;
+    }
+    const auto valueColumn = spec.valueField->column();
+    if (valueColumn.containerId() != containerId) {
+        return std::nullopt;
+    }
+    auto aggregateIt = _aggregateColumns.find({containerId, valueColumn.columnId()});
+    if (aggregateIt == _aggregateColumns.end()) {
+        return std::nullopt;
+    }
+    const auto &aggregate = aggregateIt->second;
+    if (!aggregate.options.byParent) {
+        return std::nullopt;
+    }
+    if (spec.kind == AggregateKind::Sum && !aggregate.options.sum) {
+        return std::nullopt;
+    }
+    if ((spec.kind == AggregateKind::Minimum || spec.kind == AggregateKind::Maximum) && !aggregate.options.minMax) {
+        return std::nullopt;
+    }
+    auto relationIt = aggregate.byParent.find(filterRelationColumnId);
+    if (relationIt == aggregate.byParent.end()) {
+        return std::nullopt;
+    }
+
+    if (spec.groupBy) {
+        std::vector<AggregationResult> result;
+        result.reserve(parentValues.size());
+        for (const auto &parentValue : parentValues) {
+            auto groupIt = relationIt->second.find(stableValueKey(parentValue));
+            if (groupIt == relationIt->second.end()) {
+                continue;
+            }
+            result.push_back(AggregationResult {
+                groupIt->second.groupValue,
+                aggregateBucketValue(groupIt->second.bucket, spec.kind),
+            });
+        }
+        return result;
+    }
+
+    AggregateBucket merged;
+    for (const auto &parentValue : parentValues) {
+        auto groupIt = relationIt->second.find(stableValueKey(parentValue));
+        if (groupIt != relationIt->second.end()) {
+            mergeAggregateBucket(merged, groupIt->second.bucket, aggregate.options);
+        }
+    }
+    if (merged.count == 0) {
+        return std::nullopt;
+    }
+    return std::vector<AggregationResult> {
+        AggregationResult {std::nullopt, aggregateBucketValue(merged, spec.kind)},
+    };
 }
 
 const RuntimeItemIdSet &RuntimeIndexStore::emptySet()
