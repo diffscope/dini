@@ -1634,6 +1634,7 @@ Transaction DocumentEngine::beginTransaction(TransactionOptions options)
         throw TransactionError("another transaction is already active");
     }
     auto data = std::make_unique<Transaction::Impl>();
+    data->owner = this;
     data->engine = _impl.get();
     data->options = options;
     data->state = TransactionState::Active;
@@ -2015,6 +2016,22 @@ EventOrigin TransactionContext::origin() const
     return _impl->origin;
 }
 
+DocumentEngine &TransactionContext::engine()
+{
+    if (!_impl || !_impl->transaction || !_impl->transaction->owner) {
+        throw TransactionError("transaction context is invalid");
+    }
+    return *_impl->transaction->owner;
+}
+
+const DocumentEngine &TransactionContext::engine() const
+{
+    if (!_impl || !_impl->transaction || !_impl->transaction->owner) {
+        throw TransactionError("transaction context is invalid");
+    }
+    return *_impl->transaction->owner;
+}
+
 ItemId TransactionContext::insert(TableHandle table, std::vector<ColumnValue> values, std::optional<VariantHandle> variant)
 {
     if (!_impl || !_impl->mutationAllowed) {
@@ -2133,6 +2150,22 @@ Transaction &Transaction::operator=(Transaction &&other) noexcept
 TransactionState Transaction::state() const noexcept
 {
     return _impl ? _impl->state : TransactionState::Failed;
+}
+
+DocumentEngine &Transaction::engine()
+{
+    if (!_impl || !_impl->owner) {
+        throw TransactionError("transaction is invalid");
+    }
+    return *_impl->owner;
+}
+
+const DocumentEngine &Transaction::engine() const
+{
+    if (!_impl || !_impl->owner) {
+        throw TransactionError("transaction is invalid");
+    }
+    return *_impl->owner;
 }
 
 const ChangeSet &Transaction::changeSet() const

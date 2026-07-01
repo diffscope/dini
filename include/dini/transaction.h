@@ -14,6 +14,8 @@
 
 namespace dini {
 
+class DocumentEngine;
+
 /**
  * @brief Result of a successfully committed ordinary, undo, or redo transaction.
  *
@@ -85,6 +87,24 @@ public:
      * @throws TransactionError if the context is invalid.
      */
     EventOrigin origin() const;
+
+    /**
+     * @brief Returns the document engine that owns the surrounding transaction.
+     *
+     * @pre The context must be bound to an active hook invocation.
+     * @post The context is not modified.
+     * @throws TransactionError if the context is invalid.
+     */
+    DocumentEngine &engine();
+
+    /**
+     * @brief Returns the document engine that owns the surrounding transaction.
+     *
+     * @pre The context must be bound to an active hook invocation.
+     * @post The context is not modified.
+     * @throws TransactionError if the context is invalid.
+     */
+    const DocumentEngine &engine() const;
 
     /**
      * @brief Inserts a table row from inside an allowed hook.
@@ -223,6 +243,24 @@ public:
      * @post The transaction is not modified.
      */
     TransactionState state() const noexcept;
+
+    /**
+     * @brief Returns the document engine that owns this transaction.
+     *
+     * @pre The transaction wrapper must be valid.
+     * @post The transaction is not modified.
+     * @throws TransactionError if this wrapper is invalid.
+     */
+    DocumentEngine &engine();
+
+    /**
+     * @brief Returns the document engine that owns this transaction.
+     *
+     * @pre The transaction wrapper must be valid.
+     * @post The transaction is not modified.
+     * @throws TransactionError if this wrapper is invalid.
+     */
+    const DocumentEngine &engine() const;
 
     /**
      * @brief Returns the semantic changes accumulated so far.

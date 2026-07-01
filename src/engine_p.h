@@ -43,6 +43,7 @@ struct DocumentEngine::Impl {
 };
 
 struct Transaction::Impl {
+    DocumentEngine *owner = nullptr;
     DocumentEngine::Impl *engine = nullptr;
     TransactionOptions options;
     TransactionState state = TransactionState::Failed;
