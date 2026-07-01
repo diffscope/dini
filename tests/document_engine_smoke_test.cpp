@@ -72,7 +72,6 @@ TEST(DocumentEngineSmokeTest, DefinesSchemaAndExercisesBasicDocumentOperations)
         .index = IndexKind::None,
         .defaultValue = Value(false),
         .nullable = false,
-        .volatileData = false,
     });
 
     // The indexed bar column makes it legal to query by bar later in the test.
@@ -84,7 +83,6 @@ TEST(DocumentEngineSmokeTest, DefinesSchemaAndExercisesBasicDocumentOperations)
         .index = IndexKind::Normal,
         .defaultValue = Value(std::int64_t {0}),
         .nullable = false,
-        .volatileData = false,
         .check = [](const Value &value) {
             const auto bar = value.asInt64();
             return bar >= 0 && bar <= 10;

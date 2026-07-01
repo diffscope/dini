@@ -81,7 +81,6 @@ namespace dini {
             hashCombine(hash, static_cast<std::uint64_t>(container.info.kind));
             hashCombine(hash, container.info.id);
             hashString(hash, container.info.debugName);
-            hashCombine(hash, container.info.volatileData ? 1 : 0);
             hashCombine(hash, container.listAssociation.value_or(0));
             for (const auto &column : container.columns) {
                 hashCombine(hash, column.info.id);
@@ -91,7 +90,6 @@ namespace dini {
                 hashCombine(hash, column.info.computed ? 1 : 0);
                 hashCombine(hash, column.info.association ? 1 : 0);
                 hashCombine(hash, column.info.variantSpecific ? 1 : 0);
-                hashCombine(hash, column.info.volatileData ? 1 : 0);
                 hashCombine(hash, column.variantId.value_or(0));
                 const auto aggregate = column.info.computed
                     ? column.computedDefinition.aggregateIndex
@@ -659,8 +657,7 @@ namespace dini {
     }
 
     std::vector<ComputedColumnUpdatedChange> recomputeComputedColumns(const SchemaDefinitionData &schemaDefinition,
-                                                                      ItemSnapshot &snapshot,
-                                                                      bool volatileData)
+                                                                      ItemSnapshot &snapshot)
     {
         std::vector<ComputedColumnUpdatedChange> changes;
         const auto &container = containerFor(schemaDefinition, snapshot.containerId);
@@ -690,7 +687,6 @@ namespace dini {
                     .column = handle,
                     .oldValue = oldValue,
                     .newValue = std::move(newValue),
-                    .volatileData = volatileData || column.info.volatileData,
                 });
             }
         }
@@ -748,16 +744,6 @@ namespace dini {
         validateUniqueColumns(engine, snapshot);
     }
 
-    bool containerIsVolatile(const DocumentEngine::Impl &engine, ContainerId containerId)
-    {
-        return containerFor(schemaData(engine.schema), containerId).info.volatileData;
-    }
-
-    bool columnIsVolatile(const DocumentEngine::Impl &engine, ColumnHandle column)
-    {
-        return columnFor(schemaData(engine.schema), column).info.volatileData;
-    }
-
     void insertSnapshot(DocumentEngine::Impl &engine, ItemSnapshot snapshot)
     {
         validateSnapshot(engine, snapshot);
@@ -766,19 +752,6 @@ namespace dini {
         engine.items[id] = RuntimeItem {std::move(snapshot)};
         addItemToIndexes(engine, engine.items.at(id).snapshot);
         observeItemId(engine, id);
-    }
-
-    ItemSnapshot snapshotForPersistence(const DocumentEngine::Impl &engine, ItemSnapshot snapshot)
-    {
-        const auto &schemaDefinition = schemaData(engine.schema);
-        snapshot.values.erase(std::remove_if(snapshot.values.begin(),
-                                             snapshot.values.end(),
-                                             [&](const ColumnValue &columnValue) {
-                                                 const auto &column = columnFor(schemaDefinition, columnValue.column);
-                                                 return column.info.volatileData;
-                                             }),
-                              snapshot.values.end());
-        return snapshot;
     }
 
     void eraseSnapshot(DocumentEngine::Impl &engine, const ItemSnapshot &snapshot)
@@ -897,18 +870,15 @@ namespace dini {
         }
     }
 
-    bool createsUndoStep(const ChangeSet &fullChangeSet, const ChangeSet &nonVolatileChangeSet)
+    bool createsUndoStep(const ChangeSet &changeSet)
     {
-        if (fullChangeSet.empty()) {
+        if (changeSet.empty()) {
             return false;
-        }
-        if (nonVolatileChangeSet.empty()) {
-            return true;
         }
 
         bool hasInsert = false;
         bool hasOnlyInsertInitialization = true;
-        for (const auto &operation : nonVolatileChangeSet.operations()) {
+        for (const auto &operation : changeSet.operations()) {
             switch (operation.kind()) {
                 case ChangeOperationKind::ItemInserted:
                 case ChangeOperationKind::ListInserted:
@@ -923,7 +893,7 @@ namespace dini {
         }
 
         if (hasInsert && hasOnlyInsertInitialization) {
-            return nonVolatileChangeSet.operations().size() == 1;
+            return changeSet.operations().size() == 1;
         }
         return true;
     }
@@ -1848,9 +1818,7 @@ ByteArray DocumentEngine::createSnapshot() const
     snapshots.reserve(_impl->items.size());
     for (const auto &[id, item] : _impl->items) {
         (void)id;
-        if (!containerIsVolatile(*_impl, item.snapshot.containerId)) {
-            snapshots.push_back(snapshotForPersistence(*_impl, item.snapshot));
-        }
+        snapshots.push_back(item.snapshot);
     }
     writer.writeSize(snapshots.size());
     for (const auto &snapshot : snapshots) {
@@ -2195,13 +2163,10 @@ ItemId Transaction::insert(TableHandle table, std::vector<ColumnValue> values, s
         snapshot.variant = std::move(variant);
         snapshot.values = std::move(values);
         validateSnapshot(engine, snapshot);
-        auto computedChanges = recomputeComputedColumns(schemaDefinition,
-                                                        snapshot,
-                                                        containerIsVolatile(engine, snapshot.containerId));
+        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
         ChangeSet operationChange;
         operationChange.append(ChangeOperation(ItemInsertedChange {
             .item = snapshot,
-            .volatileData = containerIsVolatile(engine, snapshot.containerId),
         }));
         for (const auto &change : computedChanges) {
             operationChange.append(ChangeOperation(change));
@@ -2263,16 +2228,13 @@ ItemId Transaction::insert(ListHandle list,
         snapshot.listIndex = index;
         setColumnValue(snapshot, relation->info.column, associationValue);
         validateSnapshot(engine, snapshot);
-        auto computedChanges = recomputeComputedColumns(schemaDefinition,
-                                                        snapshot,
-                                                        containerIsVolatile(engine, snapshot.containerId));
+        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
         ChangeSet operationChange;
         operationChange.append(ChangeOperation(ListInsertedChange {
             .list = list,
             .associationValue = associationValue,
             .index = index,
             .item = snapshot,
-            .volatileData = containerIsVolatile(engine, snapshot.containerId),
         }));
         for (const auto &change : computedChanges) {
             operationChange.append(ChangeOperation(change));
@@ -2330,14 +2292,12 @@ void Transaction::remove(ItemId itemId)
                 operationChange.append(ChangeOperation(ItemRemovedChange {
                     .item = snapshot,
                     .cascade = false,
-                    .volatileData = containerIsVolatile(engine, snapshot.containerId),
                 }));
                 first = false;
             } else {
                 operationChange.append(ChangeOperation(CascadeRemovedChange {
                     .item = snapshot,
                     .ancestorId = itemId,
-                    .volatileData = containerIsVolatile(engine, snapshot.containerId),
                 }));
             }
         }
@@ -2384,7 +2344,6 @@ void Transaction::removeAt(ListHandle list, Value associationValue, std::size_t 
             .associationValue = associationValue,
             .index = index,
             .item = snapshot,
-            .volatileData = containerIsVolatile(engine, snapshot.containerId),
         }));
         auto beforeContext = makeContext();
         beforeContext._impl->mutationAllowed = true;
@@ -2449,10 +2408,7 @@ void Transaction::update(ItemId itemId, ColumnHandle column, Value value, Associ
         }
         applyRelationMetadata(schemaDefinition, snapshot);
         validateSnapshot(engine, snapshot);
-        auto computedChanges = recomputeComputedColumns(schemaDefinition,
-                                                        snapshot,
-                                                        containerIsVolatile(engine, snapshot.containerId) ||
-                                                            columnIsVolatile(engine, column));
+        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
         ChangeSet operationChange;
         operationChange.append(ChangeOperation(ColumnUpdatedChange {
             .itemId = itemId,
@@ -2460,7 +2416,6 @@ void Transaction::update(ItemId itemId, ColumnHandle column, Value value, Associ
             .oldValue = oldValue,
             .newValue = value,
             .associationOptions = options,
-            .volatileData = containerIsVolatile(engine, snapshot.containerId) || columnIsVolatile(engine, column),
             .oldListIndex = oldSnapshot.listIndex,
         }));
         for (const auto &change : computedChanges) {
@@ -2508,7 +2463,6 @@ void Transaction::rotate(ListHandle list, Value associationValue, ListRotation r
             .list = list,
             .associationValue = associationValue,
             .rotation = rotation,
-            .volatileData = containerIsVolatile(engine, list.containerId()),
         }));
         auto beforeContext = makeContext();
         beforeContext._impl->mutationAllowed = true;
@@ -2548,14 +2502,13 @@ CommitResult Transaction::commit()
         };
         auto beforeContext = makeContext();
         runHooks(engine, HookStage::BeforeCommit, beforeContext, _impl->changeSet, false);
-        auto nonVolatile = _impl->changeSet.filterVolatile();
         CommitResult result {
             .changeSet = _impl->changeSet,
-            .commitLog = serializeEngineCommitLog(engine.schema, nonVolatile),
+            .commitLog = serializeEngineCommitLog(engine.schema, _impl->changeSet),
             .origin = _impl->origin,
         };
-        if (_impl->options.undoable && createsUndoStep(_impl->changeSet, nonVolatile)) {
-            engine.undoStack.push_back(UndoStep(nonVolatile));
+        if (_impl->options.undoable && createsUndoStep(_impl->changeSet)) {
+            engine.undoStack.push_back(UndoStep(_impl->changeSet));
             result.createdUndoStep = true;
             if (!engine.redoStack.empty()) {
                 engine.redoStack.clear();
@@ -2586,7 +2539,7 @@ void Transaction::rollback()
         engine.activeTransaction = false;
         return;
     }
-    auto inverse = _impl->changeSet.filterVolatile().invert();
+    auto inverse = _impl->changeSet.invert();
     try {
         applyChangeSet(engine, inverse);
     } catch (...) {

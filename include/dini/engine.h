@@ -186,16 +186,16 @@ public:
     View query(ListHandle list, const QuerySpec &spec) const;
 
     /**
-     * @brief Serializes the current non-volatile document state.
+     * @brief Serializes the current document state.
      *
      * @pre No schema mismatch exists and the engine state is internally consistent.
-     * @post The returned bytes contain no volatile tables, lists, columns, or undo/redo history.
+     * @post The returned bytes contain document data but no undo/redo history.
      * @throws LogError if snapshot serialization fails.
      */
     ByteArray createSnapshot() const;
 
     /**
-     * @brief Restores non-volatile document state from snapshot bytes.
+     * @brief Restores document state from snapshot bytes.
      *
      * @param snapshot Snapshot bytes produced by a compatible engine schema.
      * @pre snapshot must match this engine schema and version.
@@ -209,7 +209,7 @@ public:
      *
      * @param commitLog Commit log bytes produced by a compatible engine schema.
      * @pre commitLog must be ordered after the current restored snapshot state.
-     * @post Non-volatile document state is advanced and undo/redo history remains empty.
+     * @post Document state is advanced and undo/redo history remains empty.
      * @throws RecoveryError if replay fails because of corruption, schema mismatch, or ID conflict.
      */
     void replayCommitLog(const ByteArray &commitLog);
@@ -234,7 +234,7 @@ public:
      * @brief Executes one undo special transaction.
      *
      * @pre No write transaction may be active and canUndo() should be true.
-     * @post The target UndoStep is moved to the redo stack, non-volatile state is reverted, and commit log bytes are produced.
+     * @post The target UndoStep is moved to the redo stack, document state is reverted, and commit log bytes are produced.
      * @throws TransactionError if no undo step exists or a write transaction is active; propagates after-hook exceptions after state changes.
      */
     CommitResult undo();
@@ -243,7 +243,7 @@ public:
      * @brief Executes one redo special transaction.
      *
      * @pre No write transaction may be active and canRedo() should be true.
-     * @post The target UndoStep is moved to the undo stack, non-volatile state is reapplied, and commit log bytes are produced.
+     * @post The target UndoStep is moved to the undo stack, document state is reapplied, and commit log bytes are produced.
      * @throws TransactionError if no redo step exists or a write transaction is active; propagates after-hook exceptions after state changes.
      */
     CommitResult redo();

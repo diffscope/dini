@@ -71,18 +71,15 @@ namespace dini {
                 using T = std::decay_t<decltype(change)>;
                 if constexpr (std::is_same_v<T, ItemInsertedChange>) {
                     writeItemSnapshot(writer, change.item);
-                    writer.writeBool(change.volatileData);
                 } else if constexpr (std::is_same_v<T, ItemRemovedChange>) {
                     writeItemSnapshot(writer, change.item);
                     writer.writeBool(change.cascade);
-                    writer.writeBool(change.volatileData);
                 } else if constexpr (std::is_same_v<T, ColumnUpdatedChange>) {
                     writer.writeUInt64(change.itemId);
                     writeColumnHandle(writer, change.column);
                     writeValue(writer, change.oldValue);
                     writeValue(writer, change.newValue);
                     writeAssociationOptions(writer, change.associationOptions);
-                    writer.writeBool(change.volatileData);
                     writer.writeBool(change.oldListIndex.has_value());
                     if (change.oldListIndex) {
                         writer.writeSize(*change.oldListIndex);
@@ -92,28 +89,23 @@ namespace dini {
                     writeColumnHandle(writer, change.column);
                     writeValue(writer, change.oldValue);
                     writeValue(writer, change.newValue);
-                    writer.writeBool(change.volatileData);
                 } else if constexpr (std::is_same_v<T, CascadeRemovedChange>) {
                     writeItemSnapshot(writer, change.item);
                     writer.writeUInt64(change.ancestorId);
-                    writer.writeBool(change.volatileData);
                 } else if constexpr (std::is_same_v<T, ListInsertedChange>) {
                     writeListHandle(writer, change.list);
                     writeValue(writer, change.associationValue);
                     writer.writeSize(change.index);
                     writeItemSnapshot(writer, change.item);
-                    writer.writeBool(change.volatileData);
                 } else if constexpr (std::is_same_v<T, ListRemovedChange>) {
                     writeListHandle(writer, change.list);
                     writeValue(writer, change.associationValue);
                     writer.writeSize(change.index);
                     writeItemSnapshot(writer, change.item);
-                    writer.writeBool(change.volatileData);
                 } else if constexpr (std::is_same_v<T, ListRotatedChange>) {
                     writeListHandle(writer, change.list);
                     writeValue(writer, change.associationValue);
                     writeRotation(writer, change.rotation);
-                    writer.writeBool(change.volatileData);
                 }
             },
             operation.payload());
@@ -126,13 +118,11 @@ namespace dini {
             case ChangeOperationKind::ItemInserted:
                 return ChangeOperation(ItemInsertedChange {
                     .item = readItemSnapshot(reader),
-                    .volatileData = reader.readBool(),
                 });
             case ChangeOperationKind::ItemRemoved:
                 return ChangeOperation(ItemRemovedChange {
                     .item = readItemSnapshot(reader),
                     .cascade = reader.readBool(),
-                    .volatileData = reader.readBool(),
                 });
             case ChangeOperationKind::ColumnUpdated:
             {
@@ -142,7 +132,6 @@ namespace dini {
                     .oldValue = readValue(reader),
                     .newValue = readValue(reader),
                     .associationOptions = readAssociationOptions(reader),
-                    .volatileData = reader.readBool(),
                 };
                 if (reader.readBool()) {
                     change.oldListIndex = reader.readSize();
@@ -155,13 +144,11 @@ namespace dini {
                     .column = readColumnHandle(reader),
                     .oldValue = readValue(reader),
                     .newValue = readValue(reader),
-                    .volatileData = reader.readBool(),
                 });
             case ChangeOperationKind::CascadeRemoved:
                 return ChangeOperation(CascadeRemovedChange {
                     .item = readItemSnapshot(reader),
                     .ancestorId = reader.readUInt64(),
-                    .volatileData = reader.readBool(),
                 });
             case ChangeOperationKind::ListInserted:
                 return ChangeOperation(ListInsertedChange {
@@ -169,7 +156,6 @@ namespace dini {
                     .associationValue = readValue(reader),
                     .index = reader.readSize(),
                     .item = readItemSnapshot(reader),
-                    .volatileData = reader.readBool(),
                 });
             case ChangeOperationKind::ListRemoved:
                 return ChangeOperation(ListRemovedChange {
@@ -177,14 +163,12 @@ namespace dini {
                     .associationValue = readValue(reader),
                     .index = reader.readSize(),
                     .item = readItemSnapshot(reader),
-                    .volatileData = reader.readBool(),
                 });
             case ChangeOperationKind::ListRotated:
                 return ChangeOperation(ListRotatedChange {
                     .list = readListHandle(reader),
                     .associationValue = readValue(reader),
                     .rotation = readRotation(reader),
-                    .volatileData = reader.readBool(),
                 });
         }
         throw LogError("unknown change operation kind");

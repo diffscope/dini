@@ -51,7 +51,6 @@ struct DINI_EXPORT ColumnDefinition {
     std::optional<Value> defaultValue;
     bool nullable = true;
     bool participatesInUniqueWhenNull = false;
-    bool volatileData = false;
     AggregateIndexOptions aggregateIndex;
     std::function<bool(const Value &)> check;
 };
@@ -68,7 +67,6 @@ struct DINI_EXPORT ComputedColumnDefinition {
     ValueType type = ValueType::Null;
     IndexKind index = IndexKind::None;
     bool nullable = true;
-    bool volatileData = false;
     AggregateIndexOptions aggregateIndex;
     std::vector<ColumnHandle> dependsOn;
     std::function<Value(const std::vector<Value> &)> compute;
@@ -120,7 +118,6 @@ struct DINI_EXPORT VariantColumnDefinition {
     IndexKind index = IndexKind::None;
     std::optional<Value> defaultValue;
     bool nullable = true;
-    bool volatileData = false;
     AggregateIndexOptions aggregateIndex;
     std::function<bool(const Value &)> check;
 };
@@ -147,7 +144,6 @@ struct DINI_EXPORT ContainerInfo {
     ContainerKind kind = ContainerKind::Table;
     ContainerId id = 0;
     std::string debugName;
-    bool volatileData = false;
 };
 
 /**
@@ -165,7 +161,6 @@ struct DINI_EXPORT ColumnInfo {
     bool computed = false;
     bool association = false;
     bool variantSpecific = false;
-    bool volatileData = false;
 };
 
 /**
@@ -535,16 +530,6 @@ public:
     TableHandle handle() const;
 
     /**
-     * @brief Marks the table as volatile or persistent.
-     *
-     * @param enabled True for volatile non-persistent table data.
-     * @pre The owning SchemaBuilder must be mutable.
-     * @post Volatile table data is excluded from snapshots, logs, rollback, and undo history.
-     * @throws SchemaError if schema definition is frozen.
-     */
-    void setVolatile(bool enabled);
-
-    /**
      * @brief Adds a normal stored column to the table.
      *
      * @param definition Column declaration.
@@ -698,16 +683,6 @@ public:
      * @throws SchemaError if this builder is invalid.
      */
     ListHandle handle() const;
-
-    /**
-     * @brief Marks the list as volatile or persistent.
-     *
-     * @param enabled True for volatile non-persistent list data.
-     * @pre The owning SchemaBuilder must be mutable.
-     * @post Volatile list data is excluded from snapshots, logs, rollback, and undo history.
-     * @throws SchemaError if schema definition is frozen.
-     */
-    void setVolatile(bool enabled);
 
     /**
      * @brief Adds the association column that groups list instances.

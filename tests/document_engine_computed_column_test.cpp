@@ -249,7 +249,6 @@ TEST(DocumentEngineComputedColumnTest, ComputedColumnInChangeset)
         {
             auto payload = std::get<ComputedColumnUpdatedChange>(op.payload());
             EXPECT_EQ(payload.itemId, itemId);
-            EXPECT_FALSE(payload.volatileData);
             foundComputedUpdate = true;
         }
     }

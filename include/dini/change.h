@@ -52,7 +52,6 @@ struct DINI_EXPORT ItemSnapshot {
  */
 struct DINI_EXPORT ItemInsertedChange {
     ItemSnapshot item;
-    bool volatileData = false;
 };
 
 /**
@@ -64,7 +63,6 @@ struct DINI_EXPORT ItemInsertedChange {
 struct DINI_EXPORT ItemRemovedChange {
     ItemSnapshot item;
     bool cascade = false;
-    bool volatileData = false;
 };
 
 /**
@@ -80,7 +78,6 @@ struct DINI_EXPORT ColumnUpdatedChange {
     Value oldValue;
     Value newValue;
     AssociationUpdateOptions associationOptions;
-    bool volatileData = false;
     std::optional<std::size_t> oldListIndex;
 };
 
@@ -95,7 +92,6 @@ struct DINI_EXPORT ComputedColumnUpdatedChange {
     ColumnHandle column;
     Value oldValue;
     Value newValue;
-    bool volatileData = false;
 };
 
 /**
@@ -107,7 +103,6 @@ struct DINI_EXPORT ComputedColumnUpdatedChange {
 struct DINI_EXPORT CascadeRemovedChange {
     ItemSnapshot item;
     ItemId ancestorId = 0;
-    bool volatileData = false;
 };
 
 /**
@@ -121,7 +116,6 @@ struct DINI_EXPORT ListInsertedChange {
     Value associationValue;
     std::size_t index = 0;
     ItemSnapshot item;
-    bool volatileData = false;
 };
 
 /**
@@ -134,7 +128,6 @@ struct DINI_EXPORT ListRemovedChange {
     Value associationValue;
     std::size_t index = 0;
     ItemSnapshot item;
-    bool volatileData = false;
 };
 
 /**
@@ -147,7 +140,6 @@ struct DINI_EXPORT ListRotatedChange {
     ListHandle list;
     Value associationValue;
     ListRotation rotation;
-    bool volatileData = false;
 };
 
 /**
@@ -256,14 +248,6 @@ public:
      */
     const Payload &payload() const noexcept;
 
-    /**
-     * @brief Tests whether this operation affects volatile data only.
-     *
-     * @pre None.
-     * @post Returns true when the operation should be excluded from persistence and undo.
-     */
-    bool isVolatile() const noexcept;
-
 private:
     struct Impl;
     SharedDataPointer<Impl> _impl;
@@ -274,7 +258,7 @@ private:
  *
  * ChangeSet is the central event, rollback, undo, redo, and logging payload. It
  * preserves operation order and first-class list semantics while allowing callers
- * to derive inverse, merged, and non-volatile forms.
+ * to derive inverse and merged forms.
  */
 class DINI_EXPORT ChangeSet {
 public:
@@ -343,7 +327,7 @@ public:
      * @brief Tests whether the change set contains no operations.
      *
      * @pre None.
-     * @post Does not inspect volatile filtering.
+     * @post Does not modify the change set.
      */
     bool empty() const noexcept;
 
@@ -383,7 +367,7 @@ public:
     void addDerivedLink(DerivedChangeLink link);
 
     /**
-     * @brief Produces the inverse change set needed to restore prior non-volatile state.
+     * @brief Produces the inverse change set needed to restore prior state.
      *
      * @pre The change set must contain enough old state for every invertible operation.
      * @post The returned ChangeSet applies inverse operations in a valid order.
@@ -392,17 +376,9 @@ public:
     ChangeSet invert() const;
 
     /**
-     * @brief Produces a change set with volatile-only operations removed.
-     *
-     * @pre None.
-     * @post The returned ChangeSet contains only operations relevant to persistence and undo.
-     */
-    ChangeSet filterVolatile() const;
-
-    /**
      * @brief Serializes this change set into commit-log bytes.
      *
-     * @pre The change set must be compatible with the active schema and contain no volatile data when used for persistence.
+     * @pre The change set must be compatible with the active schema.
      * @post The returned bytes can be passed to DocumentEngine::replayCommitLog for a compatible schema.
      * @throws LogError if serialization cannot represent an operation.
      */
@@ -425,8 +401,8 @@ private:
 /**
  * @brief Non-persistent undo history entry for one committed transaction.
  *
- * UndoStep records the non-volatile ChangeSet and user-facing metadata needed by
- * the current memory session. It must not be included in snapshots or logs.
+ * UndoStep records the committed ChangeSet and user-facing metadata needed by
+ * the current memory session. It is not included in snapshots or logs.
  */
 class DINI_EXPORT UndoStep {
 public:
@@ -439,11 +415,11 @@ public:
     UndoStep();
 
     /**
-     * @brief Creates an undo step from a committed non-volatile change set.
+     * @brief Creates an undo step from a committed change set.
      *
-     * @param changeSet Non-volatile committed change set.
+     * @param changeSet Committed change set.
      * @param label Optional diagnostic label.
-     * @pre changeSet should not contain volatile-only operations.
+     * @pre changeSet should describe a committed transaction.
      * @post changeSet() returns the supplied change set.
      */
     UndoStep(ChangeSet changeSet, std::string label = {});

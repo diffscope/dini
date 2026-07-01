@@ -409,11 +409,6 @@ TableHandle TableBuilder::handle() const
     return TableHandle(_impl->builder->data.schemaId, _impl->containerId, container->info.debugName);
 }
 
-void TableBuilder::setVolatile(bool enabled)
-{
-    requireContainer(_impl ? _impl->builder : nullptr, _impl ? _impl->containerId : 0).info.volatileData = enabled;
-}
-
 ColumnHandle TableBuilder::addColumn(const ColumnDefinition &definition)
 {
     requireColumnDefinition(definition.type);
@@ -422,7 +417,6 @@ ColumnHandle TableBuilder::addColumn(const ColumnDefinition &definition)
     record.info.debugName = definition.debugName;
     record.info.type = definition.type;
     record.info.index = definition.index;
-    record.info.volatileData = definition.volatileData;
     record.normalDefinition = definition;
     return addColumnRecord(_impl->builder, container, std::move(record));
 }
@@ -436,7 +430,6 @@ ColumnHandle TableBuilder::addComputedColumn(const ComputedColumnDefinition &def
     record.info.type = definition.type;
     record.info.index = definition.index;
     record.info.computed = true;
-    record.info.volatileData = definition.volatileData;
     record.computedDefinition = definition;
     return addColumnRecord(_impl->builder, container, std::move(record));
 }
@@ -491,7 +484,6 @@ ColumnHandle TableBuilder::addVariantColumn(const VariantColumnDefinition &defin
     record.info.type = definition.type;
     record.info.index = definition.index;
     record.info.variantSpecific = true;
-    record.info.volatileData = definition.volatileData;
     record.variantDefinition = definition;
     record.variantId = definition.variant.variantId();
     return addColumnRecord(_impl->builder, container, std::move(record));
@@ -531,11 +523,6 @@ ListHandle ListBuilder::handle() const
     }
     const auto *container = findContainer(_impl->builder->data, _impl->containerId);
     return ListHandle(_impl->builder->data.schemaId, _impl->containerId, container->info.debugName);
-}
-
-void ListBuilder::setVolatile(bool enabled)
-{
-    requireContainer(_impl ? _impl->builder : nullptr, _impl ? _impl->containerId : 0).info.volatileData = enabled;
 }
 
 RelationHandle ListBuilder::setAssociation(const AssociationDefinition &definition)

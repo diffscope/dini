@@ -80,7 +80,7 @@ TEST(DocumentEngineTransactionTest, TransactionLifecycleInsertCommit)
     EXPECT_TRUE(engine.contains(id));
 }
 
-TEST(DocumentEngineTransactionTest, TransactionRollbackNonVolatile)
+TEST(DocumentEngineTransactionTest, TransactionRollbackRevertsChanges)
 {
     auto s = buildItemSchema();
     DocumentEngine engine(s.schema);
@@ -382,4 +382,3 @@ TEST(DocumentEngineTransactionTest, TransactionRollbackInverseChangeset)
 }
 
 } // namespace
-

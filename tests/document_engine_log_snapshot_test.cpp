@@ -64,12 +64,12 @@ struct TestSchema {
     TableHandle itemTable;
     ColumnHandle itemName;
     ColumnHandle itemValue;
-    ColumnHandle itemVolatileTag;
+    ColumnHandle itemTag;
     ColumnHandle itemCode;        // Unique-indexed column for test 4
 
-    // Table "VolatileState" -- entire table is volatile
-    TableHandle volatileTable;
-    ColumnHandle volatileColData;
+    // Table "State"
+    TableHandle stateTable;
+    ColumnHandle stateColData;
 
     // Table "Group" -- association target for the list
     TableHandle groupTable;
@@ -90,13 +90,12 @@ TestSchema buildTestSchema()
     auto itemTbl = builder.createTable("Item");
     s.itemName = itemTbl.addColumn(stringColumn("name", IndexKind::Normal));
     s.itemValue = itemTbl.addColumn(int64Column("value", IndexKind::Normal));
-    s.itemVolatileTag = itemTbl.addColumn(ColumnDefinition {
-        .debugName = "volatileTag",
+    s.itemTag = itemTbl.addColumn(ColumnDefinition {
+        .debugName = "tag",
         .type = ValueType::String,
         .index = IndexKind::None,
         .defaultValue = Value(""),
         .nullable = false,
-        .volatileData = true,
     });
     s.itemCode = itemTbl.addColumn(ColumnDefinition {
         .debugName = "code",
@@ -107,11 +106,10 @@ TestSchema buildTestSchema()
     });
     s.itemTable = itemTbl.handle();
 
-    // ---- VolatileState (entire table volatile) ----
-    auto volTbl = builder.createTable("VolatileState");
-    volTbl.setVolatile(true);
-    s.volatileColData = volTbl.addColumn(stringColumn("data"));
-    s.volatileTable = volTbl.handle();
+    // ---- State ----
+    auto stateTbl = builder.createTable("State");
+    s.stateColData = stateTbl.addColumn(stringColumn("data"));
+    s.stateTable = stateTbl.handle();
 
     // ---- Group ----
     auto grpTbl = builder.createTable("Group");
@@ -154,21 +152,21 @@ SeedResult seedEngine(DocumentEngine &engine, const TestSchema &s)
         r.item1Id = txn.insert(s.itemTable, {
             ColumnValue{.column = s.itemName, .value = Value("Alpha")},
             ColumnValue{.column = s.itemValue, .value = Value(std::int64_t{100})},
-            ColumnValue{.column = s.itemVolatileTag, .value = Value("vol-a")},
+            ColumnValue{.column = s.itemTag, .value = Value("tag-a")},
             ColumnValue{.column = s.itemCode, .value = Value("C1")},
         });
 
         r.item2Id = txn.insert(s.itemTable, {
             ColumnValue{.column = s.itemName, .value = Value("Beta")},
             ColumnValue{.column = s.itemValue, .value = Value(std::int64_t{200})},
-            ColumnValue{.column = s.itemVolatileTag, .value = Value("vol-b")},
+            ColumnValue{.column = s.itemTag, .value = Value("tag-b")},
             ColumnValue{.column = s.itemCode, .value = Value("C2")},
         });
 
         r.item3Id = txn.insert(s.itemTable, {
             ColumnValue{.column = s.itemName, .value = Value("Gamma")},
             ColumnValue{.column = s.itemValue, .value = Value(std::int64_t{300})},
-            ColumnValue{.column = s.itemVolatileTag, .value = Value("vol-c")},
+            ColumnValue{.column = s.itemTag, .value = Value("tag-c")},
             ColumnValue{.column = s.itemCode, .value = Value("C3")},
         });
 
@@ -193,10 +191,10 @@ SeedResult seedEngine(DocumentEngine &engine, const TestSchema &s)
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: SnapshotExcludesVolatileColumn
+// Test 1: SnapshotIncludesRegularColumn
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, SnapshotExcludesVolatileColumn)
+TEST(DocumentEngineLogSnapshotTest, SnapshotIncludesRegularColumn)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);
@@ -207,14 +205,13 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotExcludesVolatileColumn)
         itemId = txn.insert(s.itemTable, {
             ColumnValue{.column = s.itemName, .value = Value("Kilo")},
             ColumnValue{.column = s.itemValue, .value = Value(std::int64_t{500})},
-            ColumnValue{.column = s.itemVolatileTag, .value = Value("sensitive-data")},
+            ColumnValue{.column = s.itemTag, .value = Value("persistent-data")},
             ColumnValue{.column = s.itemCode, .value = Value("K1")},
         });
         txn.commit();
     }
 
-    // Verify volatile column is present before snapshot
-    EXPECT_EQ(engine.read(itemId, s.itemVolatileTag).asString(), "sensitive-data");
+    EXPECT_EQ(engine.read(itemId, s.itemTag).asString(), "persistent-data");
     EXPECT_EQ(engine.read(itemId, s.itemName).asString(), "Kilo");
     EXPECT_EQ(engine.read(itemId, s.itemValue).asInt64(), 500);
 
@@ -223,45 +220,41 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotExcludesVolatileColumn)
     DocumentEngine restored(s.schema);
     restored.restoreSnapshot(snapshot);
 
-    // Non-volatile columns survive the snapshot
     EXPECT_EQ(restored.read(itemId, s.itemName).asString(), "Kilo");
     EXPECT_EQ(restored.read(itemId, s.itemValue).asInt64(), 500);
     EXPECT_EQ(restored.read(itemId, s.itemCode).asString(), "K1");
-
-    // Volatile column value is NOT restored -- falls back to default
-    EXPECT_EQ(restored.read(itemId, s.itemVolatileTag).asString(), "");
+    EXPECT_EQ(restored.read(itemId, s.itemTag).asString(), "persistent-data");
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: SnapshotExcludesVolatileTable
+// Test 2: SnapshotIncludesRegularTable
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, SnapshotExcludesVolatileTable)
+TEST(DocumentEngineLogSnapshotTest, SnapshotIncludesRegularTable)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);
 
-    // Populate volatile table
-    ItemId volId = 0;
+    ItemId stateId = 0;
     {
         auto txn = engine.beginTransaction();
-        volId = txn.insert(s.volatileTable, {
-            ColumnValue{.column = s.volatileColData, .value = Value("ephemeral")},
+        stateId = txn.insert(s.stateTable, {
+            ColumnValue{.column = s.stateColData, .value = Value("persistent")},
         });
         txn.commit();
     }
 
-    EXPECT_EQ(engine.view(s.volatileTable).count(), 1U);
-    EXPECT_EQ(engine.read(volId, s.volatileColData).asString(), "ephemeral");
+    EXPECT_EQ(engine.view(s.stateTable).count(), 1U);
+    EXPECT_EQ(engine.read(stateId, s.stateColData).asString(), "persistent");
 
     const auto snapshot = engine.createSnapshot();
 
     DocumentEngine restored(s.schema);
     restored.restoreSnapshot(snapshot);
 
-    // Volatile table data is absent after restore
-    EXPECT_EQ(restored.view(s.volatileTable).count(), 0U);
-    EXPECT_FALSE(restored.contains(volId));
+    EXPECT_EQ(restored.view(s.stateTable).count(), 1U);
+    EXPECT_TRUE(restored.contains(stateId));
+    EXPECT_EQ(restored.read(stateId, s.stateColData).asString(), "persistent");
 }
 
 // ---------------------------------------------------------------------------
@@ -665,12 +658,12 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotPreservesMultiTableState)
     // Populate all containers
     auto seed = seedEngine(engine, s);
 
-    // Also populate the volatile table in the original engine
-    ItemId volId = 0;
+    // Also populate the state table in the original engine
+    ItemId stateId = 0;
     {
         auto txn = engine.beginTransaction();
-        volId = txn.insert(s.volatileTable, {
-            ColumnValue{.column = s.volatileColData, .value = Value("transient")},
+        stateId = txn.insert(s.stateTable, {
+            ColumnValue{.column = s.stateColData, .value = Value("transient")},
         });
         txn.commit();
     }
@@ -680,7 +673,7 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotPreservesMultiTableState)
     DocumentEngine restored(s.schema);
     restored.restoreSnapshot(snapshot);
 
-    // ---- Item table: all items with non-volatile columns ----
+    // ---- Item table ----
     EXPECT_EQ(restored.view(s.itemTable).count(), 3U);
 
     EXPECT_TRUE(restored.contains(seed.item1Id));
@@ -698,9 +691,10 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotPreservesMultiTableState)
     EXPECT_EQ(restored.read(seed.item3Id, s.itemValue).asInt64(), 300);
     EXPECT_EQ(restored.read(seed.item3Id, s.itemCode).asString(), "C3");
 
-    // ---- Volatile table is empty (volatile data excluded) ----
-    EXPECT_EQ(restored.view(s.volatileTable).count(), 0U);
-    EXPECT_FALSE(restored.contains(volId));
+    // ---- State table ----
+    EXPECT_EQ(restored.view(s.stateTable).count(), 1U);
+    EXPECT_TRUE(restored.contains(stateId));
+    EXPECT_EQ(restored.read(stateId, s.stateColData).asString(), "transient");
 
     // ---- Group table ----
     EXPECT_EQ(restored.view(s.groupTable).count(), 1U);

@@ -38,21 +38,6 @@ namespace dini {
                           payload);
     }
 
-    bool operationIsVolatile(const ChangeOperation::Payload &payload) noexcept
-    {
-        return std::visit(Overloaded {
-                              [](const ItemInsertedChange &change) { return change.volatileData; },
-                              [](const ItemRemovedChange &change) { return change.volatileData; },
-                              [](const ColumnUpdatedChange &change) { return change.volatileData; },
-                              [](const ComputedColumnUpdatedChange &change) { return change.volatileData; },
-                              [](const CascadeRemovedChange &change) { return change.volatileData; },
-                              [](const ListInsertedChange &change) { return change.volatileData; },
-                              [](const ListRemovedChange &change) { return change.volatileData; },
-                              [](const ListRotatedChange &change) { return change.volatileData; },
-                          },
-                          payload);
-    }
-
     ChangeOperation invertOperation(const ChangeOperation &operation)
     {
         return std::visit(Overloaded {
@@ -60,13 +45,11 @@ namespace dini {
                                   return ChangeOperation(ItemRemovedChange {
                                       .item = change.item,
                                       .cascade = false,
-                                      .volatileData = change.volatileData,
                                   });
                               },
                               [](const ItemRemovedChange &change) -> ChangeOperation {
                                   return ChangeOperation(ItemInsertedChange {
                                       .item = change.item,
-                                      .volatileData = change.volatileData,
                                   });
                               },
                               [](const ColumnUpdatedChange &change) -> ChangeOperation {
@@ -82,7 +65,6 @@ namespace dini {
                                       .oldValue = change.newValue,
                                       .newValue = change.oldValue,
                                       .associationOptions = inverseOptions,
-                                      .volatileData = change.volatileData,
                                       .oldListIndex = change.associationOptions.targetIndex,
                                   });
                               },
@@ -92,13 +74,11 @@ namespace dini {
                                       .column = change.column,
                                       .oldValue = change.newValue,
                                       .newValue = change.oldValue,
-                                      .volatileData = change.volatileData,
                                   });
                               },
                               [](const CascadeRemovedChange &change) -> ChangeOperation {
                                   return ChangeOperation(ItemInsertedChange {
                                       .item = change.item,
-                                      .volatileData = change.volatileData,
                                   });
                               },
                               [](const ListInsertedChange &change) -> ChangeOperation {
@@ -107,7 +87,6 @@ namespace dini {
                                       .associationValue = change.associationValue,
                                       .index = change.index,
                                       .item = change.item,
-                                      .volatileData = change.volatileData,
                                   });
                               },
                               [](const ListRemovedChange &change) -> ChangeOperation {
@@ -116,7 +95,6 @@ namespace dini {
                                       .associationValue = change.associationValue,
                                       .index = change.index,
                                       .item = change.item,
-                                      .volatileData = change.volatileData,
                                   });
                               },
                               [](const ListRotatedChange &change) -> ChangeOperation {
@@ -126,7 +104,6 @@ namespace dini {
                                       .list = change.list,
                                       .associationValue = change.associationValue,
                                       .rotation = rotation,
-                                      .volatileData = change.volatileData,
                                   });
                               },
                           },
@@ -163,12 +140,6 @@ const ChangeOperation::Payload &ChangeOperation::payload() const noexcept
 {
     __stdc_impl_t;
     return impl.payload;
-}
-
-bool ChangeOperation::isVolatile() const noexcept
-{
-    __stdc_impl_t;
-    return operationIsVolatile(impl.payload);
 }
 
 ChangeSet::ChangeSet() : _impl(new Impl(this))
@@ -234,39 +205,6 @@ ChangeSet ChangeSet::invert() const
     }
 
     return ChangeSet(std::move(invertedOperations));
-}
-
-ChangeSet ChangeSet::filterVolatile() const
-{
-    __stdc_impl_t;
-
-    ChangeSet filtered;
-    std::vector<std::size_t> indexMap(impl.operations.size(), impl.operations.size());
-
-    for (std::size_t i = 0; i < impl.operations.size(); ++i) {
-        const auto &operation = impl.operations[i];
-        if (!operation.isVolatile()) {
-            indexMap[i] = filtered.operations().size();
-            filtered.append(operation);
-        }
-    }
-
-    for (const auto &link : impl.derivedLinks) {
-        if (link.sourceOperation >= indexMap.size() || link.derivedOperation >= indexMap.size()) {
-            continue;
-        }
-
-        const auto sourceOperation = indexMap[link.sourceOperation];
-        const auto derivedOperation = indexMap[link.derivedOperation];
-        if (sourceOperation != impl.operations.size() && derivedOperation != impl.operations.size()) {
-            filtered.addDerivedLink(DerivedChangeLink {
-                .sourceOperation = sourceOperation,
-                .derivedOperation = derivedOperation,
-            });
-        }
-    }
-
-    return filtered;
 }
 
 ByteArray ChangeSet::serializeForLog() const

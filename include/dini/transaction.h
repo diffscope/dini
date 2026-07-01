@@ -18,8 +18,8 @@ namespace dini {
  * @brief Result of a successfully committed ordinary, undo, or redo transaction.
  *
  * CommitResult carries the public semantic change set and persistent log bytes.
- * For ordinary transactions, createdUndoStep indicates whether the non-volatile
- * committed change was pushed to the undo stack.
+ * For ordinary transactions, createdUndoStep indicates whether the committed
+ * change was pushed to the undo stack.
  */
 struct DINI_EXPORT CommitResult {
     ChangeSet changeSet;
@@ -160,7 +160,7 @@ private:
  *
  * Transaction is the only public write path for ordinary updates. Updates become
  * globally readable immediately after application, while commit produces logs and
- * undo history and rollback applies inverse non-volatile changes.
+ * undo history and rollback applies inverse changes.
  */
 class DINI_EXPORT Transaction {
 public:
@@ -319,7 +319,7 @@ public:
      * @brief Rolls back the active or failed transaction.
      *
      * @pre The transaction must not already be committed or rolled back.
-     * @post Non-volatile changes are reversed, rollback events are published, and the transaction is completed.
+     * @post Changes are reversed, rollback events are published, and the transaction is completed.
      * @throws TransactionError if rollback cannot be performed.
      */
     void rollback();
