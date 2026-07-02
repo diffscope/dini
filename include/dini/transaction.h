@@ -122,12 +122,12 @@ public:
      * @brief Inserts a list element from inside an allowed hook.
      *
      * @param list Target list.
-     * @param associationValue Non-null association value identifying the list instance.
-     * @param index Insertion index inside the association-value group.
+     * @param associationValue Association value identifying the list instance, or null to create an unattached list item.
+     * @param index Insertion index inside the association-value group; must be 0 when associationValue is null.
      * @param values Initial column values.
      * @param variant Optional polymorphic variant for polymorphic lists.
-     * @pre The context must be in a BeforeApply hook and index must be within the current list length.
-     * @post A new globally unique list element is visible at the requested position.
+     * @pre The context must be in a BeforeApply hook, and index must be within the current list length or 0 for null association.
+     * @post A new globally unique list element is visible at the requested position, or unattached when associationValue is null.
      * @throws HookError if mutation is forbidden in the current hook stage.
      */
     ItemId insert(ListHandle list, Value associationValue, std::size_t index, std::vector<ColumnValue> values, std::optional<VariantHandle> variant = {});
@@ -287,12 +287,12 @@ public:
      * @brief Inserts a list element at an explicit position.
      *
      * @param list Target list.
-     * @param associationValue Non-null association value identifying the list instance.
-     * @param index Insertion index inside the association-value group.
+     * @param associationValue Association value identifying the list instance, or null to create an unattached list item.
+     * @param index Insertion index inside the association-value group; must be 0 when associationValue is null.
      * @param values Initial column values.
      * @param variant Optional polymorphic variant for polymorphic lists.
-     * @pre The transaction must be active and index must be within the current list length.
-     * @post A new globally unique list element is visible at the requested position.
+     * @pre The transaction must be active, and index must be within the current list length or 0 for null association.
+     * @post A new globally unique list element is visible at the requested position, or unattached when associationValue is null.
      * @throws TransactionError if the transaction is inactive or failed.
      */
     ItemId insert(ListHandle list, Value associationValue, std::size_t index, std::vector<ColumnValue> values, std::optional<VariantHandle> variant = {});

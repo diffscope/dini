@@ -3,6 +3,7 @@
 #include <vector>
 
 #include <dini/engine.h>
+#include <dini/errors.h>
 
 #include <gtest/gtest.h>
 
@@ -731,6 +732,157 @@ TEST(DocumentEngineListTest, ListMoveViaAssociationUpdate)
     const auto ids2 = orderedIdsForAssociation(engine.view(ps.playlistList), assoc2);
     ASSERT_EQ(ids2.size(), 1U);
     EXPECT_EQ(ids2[0], element);
+}
+
+TEST(DocumentEngineListTest, ListInsertWithNullAssociationCreatesUnattachedItem)
+{
+    const PlaylistSchema ps;
+    DocumentEngine engine(ps.schema);
+    const auto songs = seedThreeSongs(engine, ps);
+    const auto assocValue = idValue(songs.song1);
+
+    ItemId element = 0;
+    CommitResult result;
+    {
+        auto tx = engine.beginTransaction();
+        element = tx.insert(ps.playlistList, Value::null(), 0, {
+            ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
+        });
+        result = tx.commit();
+    }
+
+    EXPECT_TRUE(engine.contains(element));
+    EXPECT_EQ(engine.listLength(ps.playlistList, assocValue), 0U);
+    EXPECT_TRUE(orderedIdsForAssociation(engine.view(ps.playlistList), assocValue).empty());
+
+    const auto snapshot = engine.read(element);
+    EXPECT_EQ(snapshot.containerKind, ContainerKind::List);
+    EXPECT_FALSE(snapshot.parentId.has_value());
+    EXPECT_FALSE(snapshot.listAssociationValue.has_value());
+    EXPECT_FALSE(snapshot.listIndex.has_value());
+    EXPECT_TRUE(engine.read(element, ps.playlistAssociation.column()).isNull());
+
+    const auto &ops = result.changeSet.operations();
+    bool foundItemInserted = false;
+    bool foundListInserted = false;
+    for (const auto &op : ops) {
+        foundItemInserted = foundItemInserted || op.kind() == ChangeOperationKind::ItemInserted;
+        foundListInserted = foundListInserted || op.kind() == ChangeOperationKind::ListInserted;
+    }
+    EXPECT_TRUE(foundItemInserted);
+    EXPECT_FALSE(foundListInserted);
+}
+
+TEST(DocumentEngineListTest, ListNullAssociationInsertRequiresZeroIndex)
+{
+    const PlaylistSchema ps;
+    DocumentEngine engine(ps.schema);
+    seedThreeSongs(engine, ps);
+
+    auto tx = engine.beginTransaction();
+    EXPECT_THROW(
+        tx.insert(ps.playlistList, Value::null(), 1, {
+            ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
+        }),
+        ConstraintError);
+}
+
+TEST(DocumentEngineListTest, ListAttachAndDetachUnattachedItem)
+{
+    const PlaylistSchema ps;
+    DocumentEngine engine(ps.schema);
+    const auto songs = seedThreeSongs(engine, ps);
+    const auto assocValue = idValue(songs.song1);
+
+    ItemId element = 0;
+    {
+        auto tx = engine.beginTransaction();
+        element = tx.insert(ps.playlistList, Value::null(), 0, {
+            ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
+        });
+        tx.commit();
+    }
+    EXPECT_EQ(engine.listLength(ps.playlistList, assocValue), 0U);
+
+    {
+        auto tx = engine.beginTransaction();
+        tx.update(element, ps.playlistAssociation.column(), assocValue,
+                  AssociationUpdateOptions {.targetIndex = 0});
+        tx.commit();
+    }
+    EXPECT_EQ(engine.listLength(ps.playlistList, assocValue), 1U);
+    {
+        const auto ids = orderedIdsForAssociation(engine.view(ps.playlistList), assocValue);
+        ASSERT_EQ(ids.size(), 1U);
+        EXPECT_EQ(ids[0], element);
+    }
+
+    {
+        auto tx = engine.beginTransaction();
+        tx.update(element, ps.playlistAssociation.column(), Value::null());
+        tx.commit();
+    }
+    EXPECT_EQ(engine.listLength(ps.playlistList, assocValue), 0U);
+    EXPECT_TRUE(engine.read(element, ps.playlistAssociation.column()).isNull());
+    const auto snapshot = engine.read(element);
+    EXPECT_FALSE(snapshot.listAssociationValue.has_value());
+    EXPECT_FALSE(snapshot.listIndex.has_value());
+}
+
+TEST(DocumentEngineListTest, ListUndoRedoNullAssociationInsert)
+{
+    const PlaylistSchema ps;
+    DocumentEngine engine(ps.schema);
+    seedThreeSongs(engine, ps);
+
+    ItemId element = 0;
+    {
+        auto tx = engine.beginTransaction();
+        element = tx.insert(ps.playlistList, Value::null(), 0, {
+            ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
+        });
+        tx.commit();
+    }
+    EXPECT_TRUE(engine.contains(element));
+
+    ASSERT_TRUE(engine.canUndo());
+    engine.undo();
+    EXPECT_FALSE(engine.contains(element));
+
+    ASSERT_TRUE(engine.canRedo());
+    engine.redo();
+    EXPECT_TRUE(engine.contains(element));
+    EXPECT_TRUE(engine.read(element, ps.playlistAssociation.column()).isNull());
+    EXPECT_FALSE(engine.read(element).listAssociationValue.has_value());
+}
+
+TEST(DocumentEngineListTest, ListNullAssociationSurvivesSnapshotAndLogReplay)
+{
+    const PlaylistSchema ps;
+    DocumentEngine engine(ps.schema);
+
+    ItemId element = 0;
+    CommitResult result;
+    {
+        auto tx = engine.beginTransaction();
+        element = tx.insert(ps.playlistList, Value::null(), 0, {
+            ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
+        });
+        result = tx.commit();
+    }
+
+    const auto snapshot = engine.createSnapshot();
+    DocumentEngine restored(ps.schema);
+    restored.restoreSnapshot(snapshot);
+    EXPECT_TRUE(restored.contains(element));
+    EXPECT_TRUE(restored.read(element, ps.playlistAssociation.column()).isNull());
+    EXPECT_FALSE(restored.read(element).listAssociationValue.has_value());
+
+    DocumentEngine replayed(ps.schema);
+    replayed.replayCommitLog(result.commitLog);
+    EXPECT_TRUE(replayed.contains(element));
+    EXPECT_TRUE(replayed.read(element, ps.playlistAssociation.column()).isNull());
+    EXPECT_FALSE(replayed.read(element).listAssociationValue.has_value());
 }
 
 TEST(DocumentEngineListTest, ListInsertChangesetKind)

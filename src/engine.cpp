@@ -344,7 +344,8 @@ namespace dini {
 
     void removeFromListGroup(DocumentEngine::Impl &engine, const ItemSnapshot &snapshot)
     {
-        if (snapshot.containerKind != ContainerKind::List || !snapshot.listAssociationValue) {
+        if (snapshot.containerKind != ContainerKind::List || !snapshot.listAssociationValue ||
+            snapshot.listAssociationValue->isNull()) {
             return;
         }
         const auto key = valueKey(*snapshot.listAssociationValue);
@@ -359,7 +360,8 @@ namespace dini {
 
     void insertIntoListGroup(DocumentEngine::Impl &engine, const ItemSnapshot &snapshot)
     {
-        if (snapshot.containerKind != ContainerKind::List || !snapshot.listAssociationValue) {
+        if (snapshot.containerKind != ContainerKind::List || !snapshot.listAssociationValue ||
+            snapshot.listAssociationValue->isNull()) {
             return;
         }
         const auto key = valueKey(*snapshot.listAssociationValue);
@@ -2413,14 +2415,15 @@ ItemId Transaction::insert(ListHandle list,
         if (!container.listAssociation) {
             throw ConstraintError("list association is not defined");
         }
-        if (associationValue.isNull()) {
-            throw ConstraintError("list association value must not be null");
-        }
         const auto *relation = findRelation(schemaDefinition, list.containerId(), *container.listAssociation);
-        auto groupKey = valueKey(associationValue);
-        auto &group = engine.listGroups[{list.containerId(), groupKey}];
-        if (index > group.size()) {
-            throw ConstraintError("list insertion index is out of range");
+        if (!associationValue.isNull()) {
+            auto groupKey = valueKey(associationValue);
+            auto &group = engine.listGroups[{list.containerId(), groupKey}];
+            if (index > group.size()) {
+                throw ConstraintError("list insertion index is out of range");
+            }
+        } else if (index != 0) {
+            throw ConstraintError("null list association insertion index must be zero");
         }
         ItemSnapshot snapshot;
         snapshot.id = generateItemId(engine);
@@ -2428,11 +2431,19 @@ ItemId Transaction::insert(ListHandle list,
         snapshot.containerId = list.containerId();
         snapshot.variant = std::move(variant);
         snapshot.values = std::move(values);
-        snapshot.listAssociationValue = associationValue;
-        snapshot.listIndex = index;
         setColumnValue(snapshot, relation->info.column, associationValue);
+        if (!associationValue.isNull()) {
+            snapshot.listAssociationValue = associationValue;
+            snapshot.listIndex = index;
+        }
         validateSnapshot(engine, snapshot);
-        auto operationChange = listInsertChangeSetForSnapshot(schemaDefinition, list, associationValue, index, snapshot);
+        auto operationChange = associationValue.isNull()
+                                   ? insertChangeSetForSnapshot(schemaDefinition, snapshot)
+                                   : listInsertChangeSetForSnapshot(schemaDefinition,
+                                                                    list,
+                                                                    associationValue,
+                                                                    index,
+                                                                    snapshot);
         auto beforeContext = makeContext();
         beforeContext._impl->mutationAllowed = true;
         const auto derivedStart = _impl->changeSet.operations().size();
@@ -2441,7 +2452,13 @@ ItemId Transaction::insert(ListHandle list,
             runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
         }
         const auto derivedEnd = _impl->changeSet.operations().size();
-        operationChange = listInsertChangeSetForSnapshot(schemaDefinition, list, associationValue, index, snapshot);
+        operationChange = associationValue.isNull()
+                              ? insertChangeSetForSnapshot(schemaDefinition, snapshot)
+                              : listInsertChangeSetForSnapshot(schemaDefinition,
+                                                               list,
+                                                               associationValue,
+                                                               index,
+                                                               snapshot);
         insertSnapshot(engine, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
