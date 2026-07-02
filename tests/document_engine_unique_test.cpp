@@ -270,44 +270,46 @@ TEST(DocumentEngineUniqueTest, UniqueNullParticipatesEnabled)
         ConstraintError);
 }
 
-TEST(DocumentEngineUniqueTest, UniqueParentNullScope)
+TEST(DocumentEngineUniqueTest, UniqueParentNullDoesNotParticipate)
 {
     auto s = buildUniqueTestSchema();
     DocumentEngine engine(s.schema);
 
-    // When the parent is null, uniqueness is checked globally across all
-    // null-parent items instead of per-parent.
     auto tx = engine.beginTransaction();
+    ItemId group1 = tx.insert(s.groupTable, {
+        ColumnValue {.column = s.groupIdCol, .value = Value(std::uint64_t {1})},
+    });
     ItemId m1 = tx.insert(s.memberTable, {
         ColumnValue {.column = s.memberParent.column(), .value = Value::null()},
         ColumnValue {.column = s.memberName, .value = Value("x")},
         ColumnValue {.column = s.memberValue, .value = Value(std::int64_t {1})},
     });
-    tx.commit();
-    EXPECT_TRUE(engine.contains(m1));
-
-    // Another null-parent item with the same name must conflict globally.
-    auto tx2 = engine.beginTransaction();
-    EXPECT_THROW(
-        tx2.insert(s.memberTable, {
-            ColumnValue {.column = s.memberParent.column(), .value = Value::null()},
-            ColumnValue {.column = s.memberName, .value = Value("x")},
-            ColumnValue {.column = s.memberValue, .value = Value(std::int64_t {2})},
-        }),
-        ConstraintError);
-
-    // Same name under a non-null parent is a different unique scope and must succeed.
-    auto tx3 = engine.beginTransaction();
-    ItemId group1 = tx3.insert(s.groupTable, {
-        ColumnValue {.column = s.groupIdCol, .value = Value(std::uint64_t {1})},
-    });
-    ItemId m3 = tx3.insert(s.memberTable, {
-        ColumnValue {.column = s.memberParent.column(), .value = idValue(group1)},
+    ItemId m2 = tx.insert(s.memberTable, {
+        ColumnValue {.column = s.memberParent.column(), .value = Value::null()},
         ColumnValue {.column = s.memberName, .value = Value("x")},
-        ColumnValue {.column = s.memberValue, .value = Value(std::int64_t {3})},
+        ColumnValue {.column = s.memberValue, .value = Value(std::int64_t {2})},
     });
-    tx3.commit();
-    EXPECT_TRUE(engine.contains(m3));
+    tx.commit();
+
+    EXPECT_TRUE(engine.contains(m1));
+    EXPECT_TRUE(engine.contains(m2));
+    EXPECT_EQ(engine.read(m1, s.memberName).asString(), "x");
+    EXPECT_EQ(engine.read(m2, s.memberName).asString(), "x");
+
+    auto tx2 = engine.beginTransaction();
+    tx2.update(m1, s.memberParent.column(), idValue(group1));
+    tx2.commit();
+
+    auto tx3 = engine.beginTransaction();
+    EXPECT_THROW(tx3.update(m2, s.memberParent.column(), idValue(group1)), ConstraintError);
+
+    auto tx4 = engine.beginTransaction();
+    tx4.update(m2, s.memberName, Value("y"));
+    tx4.update(m2, s.memberParent.column(), idValue(group1));
+    tx4.commit();
+
+    auto tx5 = engine.beginTransaction();
+    EXPECT_THROW(tx5.update(m2, s.memberName, Value("x")), ConstraintError);
 }
 
 TEST(DocumentEngineUniqueTest, UniqueParentIdChange)

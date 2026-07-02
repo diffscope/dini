@@ -597,6 +597,9 @@ namespace dini {
         const auto &schemaDefinition = schemaData(engine.schema);
         const auto &container = containerFor(schemaDefinition, snapshot.containerId);
         const bool parentScopedUnique = !container.relations.empty();
+        if (parentScopedUnique && !snapshot.parentId) {
+            return;
+        }
         for (const auto &column : container.columns) {
             if (column.info.index != IndexKind::Unique) {
                 continue;
