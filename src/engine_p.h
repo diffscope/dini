@@ -49,6 +49,9 @@ struct Transaction::Impl {
     TransactionState state = TransactionState::Failed;
     EventOrigin origin = EventOrigin::Normal;
     ChangeSet changeSet;
+    ItemSnapshot *pendingBeforeApplySnapshot = nullptr;
+    bool pendingBeforeApplyInsert = false;
+    ColumnId pendingBeforeApplyPrimaryColumn = 0;
     std::unordered_map<ItemId, RuntimeItem> rollbackItems;
     std::map<std::pair<ContainerId, std::string>, std::vector<ItemId>> rollbackListGroups;
     RuntimeIndexStore rollbackIndexes;

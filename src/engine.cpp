@@ -744,6 +744,180 @@ namespace dini {
         validateUniqueColumns(engine, snapshot);
     }
 
+    struct PendingBeforeApplyScope {
+        Transaction::Impl &transaction;
+        ItemSnapshot *previousSnapshot = nullptr;
+        bool previousInsert = false;
+        ColumnId previousPrimaryColumn = 0;
+
+        PendingBeforeApplyScope(Transaction::Impl &transaction,
+                                ItemSnapshot &snapshot,
+                                bool insert,
+                                ColumnId primaryColumn)
+            : transaction(transaction),
+              previousSnapshot(transaction.pendingBeforeApplySnapshot),
+              previousInsert(transaction.pendingBeforeApplyInsert),
+              previousPrimaryColumn(transaction.pendingBeforeApplyPrimaryColumn)
+        {
+            transaction.pendingBeforeApplySnapshot = &snapshot;
+            transaction.pendingBeforeApplyInsert = insert;
+            transaction.pendingBeforeApplyPrimaryColumn = primaryColumn;
+        }
+
+        ~PendingBeforeApplyScope()
+        {
+            transaction.pendingBeforeApplySnapshot = previousSnapshot;
+            transaction.pendingBeforeApplyInsert = previousInsert;
+            transaction.pendingBeforeApplyPrimaryColumn = previousPrimaryColumn;
+        }
+    };
+
+    void resetComputedColumnValues(const SchemaDefinitionData &schemaDefinition,
+                                   const ItemSnapshot &oldSnapshot,
+                                   ItemSnapshot &snapshot)
+    {
+        const auto &container = containerFor(schemaDefinition, snapshot.containerId);
+        for (const auto &column : container.columns) {
+            if (!column.info.computed) {
+                continue;
+            }
+            setColumnValue(snapshot,
+                           ColumnHandle(schemaDefinition.schemaId,
+                                        snapshot.containerId,
+                                        column.info.id,
+                                        column.info.debugName),
+                           valueForColumn(oldSnapshot, column.info.id));
+        }
+    }
+
+    void resetComputedColumnValuesToNull(const SchemaDefinitionData &schemaDefinition,
+                                         ItemSnapshot &snapshot)
+    {
+        const auto &container = containerFor(schemaDefinition, snapshot.containerId);
+        for (const auto &column : container.columns) {
+            if (!column.info.computed) {
+                continue;
+            }
+            setColumnValue(snapshot,
+                           ColumnHandle(schemaDefinition.schemaId,
+                                        snapshot.containerId,
+                                        column.info.id,
+                                        column.info.debugName),
+                           Value::null());
+        }
+    }
+
+    ChangeSet insertChangeSetForSnapshot(const SchemaDefinitionData &schemaDefinition,
+                                         ItemSnapshot &snapshot)
+    {
+        resetComputedColumnValuesToNull(schemaDefinition, snapshot);
+        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
+        ChangeSet operationChange;
+        operationChange.append(ChangeOperation(ItemInsertedChange {
+            .item = snapshot,
+        }));
+        for (const auto &change : computedChanges) {
+            operationChange.append(ChangeOperation(change));
+        }
+        return operationChange;
+    }
+
+    ChangeSet listInsertChangeSetForSnapshot(const SchemaDefinitionData &schemaDefinition,
+                                             ListHandle list,
+                                             const Value &associationValue,
+                                             std::size_t index,
+                                             ItemSnapshot &snapshot)
+    {
+        resetComputedColumnValuesToNull(schemaDefinition, snapshot);
+        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
+        ChangeSet operationChange;
+        operationChange.append(ChangeOperation(ListInsertedChange {
+            .list = std::move(list),
+            .associationValue = associationValue,
+            .index = index,
+            .item = snapshot,
+        }));
+        for (const auto &change : computedChanges) {
+            operationChange.append(ChangeOperation(change));
+        }
+        return operationChange;
+    }
+
+    ChangeSet updateChangeSetForSnapshot(const SchemaDefinitionData &schemaDefinition,
+                                         const ItemSnapshot &oldSnapshot,
+                                         ItemId itemId,
+                                         ColumnHandle column,
+                                         Value oldValue,
+                                         Value newValue,
+                                         AssociationUpdateOptions options,
+                                         std::optional<std::size_t> oldListIndex,
+                                         ItemSnapshot &snapshot)
+    {
+        resetComputedColumnValues(schemaDefinition, oldSnapshot, snapshot);
+        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
+        ChangeSet operationChange;
+        operationChange.append(ChangeOperation(ColumnUpdatedChange {
+            .itemId = itemId,
+            .column = std::move(column),
+            .oldValue = std::move(oldValue),
+            .newValue = std::move(newValue),
+            .associationOptions = options,
+            .oldListIndex = oldListIndex,
+        }));
+        for (const auto &change : computedChanges) {
+            operationChange.append(ChangeOperation(change));
+        }
+        return operationChange;
+    }
+
+    bool updatePendingBeforeApplySource(Transaction::Impl &transaction,
+                                        ItemId itemId,
+                                        ColumnHandle column,
+                                        Value value,
+                                        AssociationUpdateOptions options)
+    {
+        auto *engine = transaction.engine;
+        auto *snapshot = transaction.pendingBeforeApplySnapshot;
+        if (!engine || !snapshot || engine->hookStage != HookStage::BeforeApply || snapshot->id != itemId) {
+            return false;
+        }
+        if (snapshot->containerId != column.containerId()) {
+            throw QueryError("column does not belong to item");
+        }
+        if (options.targetIndex) {
+            throw ConstraintError("pending source updates only support normal columns");
+        }
+        const auto &schemaDefinition = schemaData(engine->schema);
+        const auto &columnRecord = columnFor(schemaDefinition, column);
+        if (columnRecord.info.computed || columnRecord.info.association) {
+            throw ConstraintError("pending source updates only support normal columns");
+        }
+        if (!transaction.pendingBeforeApplyInsert &&
+            transaction.pendingBeforeApplyPrimaryColumn == column.columnId()) {
+            throw ConstraintError("pending source update cannot overwrite the triggering column");
+        }
+        validateValueForColumn(columnRecord, value);
+
+        auto updatedSnapshot = *snapshot;
+        const auto oldValue = valueForColumn(updatedSnapshot, column.columnId());
+        setColumnValue(updatedSnapshot, column, value);
+        validateSnapshot(*engine, updatedSnapshot);
+        *snapshot = updatedSnapshot;
+
+        if (!transaction.pendingBeforeApplyInsert) {
+            ChangeSet operationChange;
+            operationChange.append(ChangeOperation(ColumnUpdatedChange {
+                .itemId = itemId,
+                .column = std::move(column),
+                .oldValue = oldValue,
+                .newValue = std::move(value),
+            }));
+            const auto derivedIndex = transaction.changeSet.operations().size();
+            appendWithDerivedLinks(transaction, operationChange, derivedIndex, derivedIndex);
+        }
+        return true;
+    }
+
     void insertSnapshot(DocumentEngine::Impl &engine, ItemSnapshot snapshot)
     {
         validateSnapshot(engine, snapshot);
@@ -2196,19 +2370,16 @@ ItemId Transaction::insert(TableHandle table, std::vector<ColumnValue> values, s
         snapshot.variant = std::move(variant);
         snapshot.values = std::move(values);
         validateSnapshot(engine, snapshot);
-        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
-        ChangeSet operationChange;
-        operationChange.append(ChangeOperation(ItemInsertedChange {
-            .item = snapshot,
-        }));
-        for (const auto &change : computedChanges) {
-            operationChange.append(ChangeOperation(change));
-        }
+        auto operationChange = insertChangeSetForSnapshot(schemaDefinition, snapshot);
         auto beforeContext = makeContext();
         beforeContext._impl->mutationAllowed = true;
         const auto derivedStart = _impl->changeSet.operations().size();
-        runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
+        {
+            PendingBeforeApplyScope pending(*_impl, snapshot, true, 0);
+            runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
+        }
         const auto derivedEnd = _impl->changeSet.operations().size();
+        operationChange = insertChangeSetForSnapshot(schemaDefinition, snapshot);
         insertSnapshot(engine, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
@@ -2261,22 +2432,16 @@ ItemId Transaction::insert(ListHandle list,
         snapshot.listIndex = index;
         setColumnValue(snapshot, relation->info.column, associationValue);
         validateSnapshot(engine, snapshot);
-        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
-        ChangeSet operationChange;
-        operationChange.append(ChangeOperation(ListInsertedChange {
-            .list = list,
-            .associationValue = associationValue,
-            .index = index,
-            .item = snapshot,
-        }));
-        for (const auto &change : computedChanges) {
-            operationChange.append(ChangeOperation(change));
-        }
+        auto operationChange = listInsertChangeSetForSnapshot(schemaDefinition, list, associationValue, index, snapshot);
         auto beforeContext = makeContext();
         beforeContext._impl->mutationAllowed = true;
         const auto derivedStart = _impl->changeSet.operations().size();
-        runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
+        {
+            PendingBeforeApplyScope pending(*_impl, snapshot, true, 0);
+            runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
+        }
         const auto derivedEnd = _impl->changeSet.operations().size();
+        operationChange = listInsertChangeSetForSnapshot(schemaDefinition, list, associationValue, index, snapshot);
         insertSnapshot(engine, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
@@ -2400,6 +2565,9 @@ void Transaction::update(ItemId itemId, ColumnHandle column, Value value, Associ
     auto &engine = *_impl->engine;
     try {
         engine.schema.validate(column);
+        if (updatePendingBeforeApplySource(*_impl, itemId, column, value, options)) {
+            return;
+        }
         auto makeContext = [&]() {
             auto data = std::make_unique<TransactionContext::Impl>();
             data->transaction = _impl.get();
@@ -2441,24 +2609,32 @@ void Transaction::update(ItemId itemId, ColumnHandle column, Value value, Associ
         }
         applyRelationMetadata(schemaDefinition, snapshot);
         validateSnapshot(engine, snapshot);
-        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
-        ChangeSet operationChange;
-        operationChange.append(ChangeOperation(ColumnUpdatedChange {
-            .itemId = itemId,
-            .column = column,
-            .oldValue = oldValue,
-            .newValue = value,
-            .associationOptions = options,
-            .oldListIndex = oldSnapshot.listIndex,
-        }));
-        for (const auto &change : computedChanges) {
-            operationChange.append(ChangeOperation(change));
-        }
+        auto operationChange = updateChangeSetForSnapshot(schemaDefinition,
+                                                          oldSnapshot,
+                                                          itemId,
+                                                          column,
+                                                          oldValue,
+                                                          value,
+                                                          options,
+                                                          oldSnapshot.listIndex,
+                                                          snapshot);
         auto beforeContext = makeContext();
         beforeContext._impl->mutationAllowed = true;
         const auto derivedStart = _impl->changeSet.operations().size();
-        runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
+        {
+            PendingBeforeApplyScope pending(*_impl, snapshot, false, column.columnId());
+            runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
+        }
         const auto derivedEnd = _impl->changeSet.operations().size();
+        operationChange = updateChangeSetForSnapshot(schemaDefinition,
+                                                     oldSnapshot,
+                                                     itemId,
+                                                     column,
+                                                     oldValue,
+                                                     value,
+                                                     options,
+                                                     oldSnapshot.listIndex,
+                                                     snapshot);
         removeItemFromIndexes(engine, oldSnapshot);
         removeFromListGroup(engine, oldSnapshot);
         it->second.snapshot = snapshot;
