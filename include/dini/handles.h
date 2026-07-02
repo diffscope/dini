@@ -119,7 +119,7 @@ public:
      * @pre None.
      * @post Returns true when both handles identify the same table handle value.
      */
-    friend bool operator==(const TableHandle &lhs, const TableHandle &rhs);
+    DINI_EXPORT friend bool operator==(const TableHandle &lhs, const TableHandle &rhs);
 
 private:
     struct Impl;
@@ -235,7 +235,7 @@ public:
      * @pre None.
      * @post Returns true when both handles identify the same list handle value.
      */
-    friend bool operator==(const ListHandle &lhs, const ListHandle &rhs);
+    DINI_EXPORT friend bool operator==(const ListHandle &lhs, const ListHandle &rhs);
 
 private:
     struct Impl;
@@ -360,7 +360,7 @@ public:
      * @pre None.
      * @post Returns true when both handles identify the same column handle value.
      */
-    friend bool operator==(const ColumnHandle &lhs, const ColumnHandle &rhs);
+    DINI_EXPORT friend bool operator==(const ColumnHandle &lhs, const ColumnHandle &rhs);
 
 private:
     struct Impl;
@@ -495,7 +495,7 @@ public:
      * @pre None.
      * @post Returns true when both handles identify the same relation handle value.
      */
-    friend bool operator==(const RelationHandle &lhs, const RelationHandle &rhs);
+    DINI_EXPORT friend bool operator==(const RelationHandle &lhs, const RelationHandle &rhs);
 
 private:
     struct Impl;
@@ -620,7 +620,7 @@ public:
      * @pre None.
      * @post Returns true when both handles identify the same variant handle value.
      */
-    friend bool operator==(const VariantHandle &lhs, const VariantHandle &rhs);
+    DINI_EXPORT friend bool operator==(const VariantHandle &lhs, const VariantHandle &rhs);
 
 private:
     struct Impl;
