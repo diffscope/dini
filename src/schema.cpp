@@ -447,7 +447,7 @@ RelationHandle TableBuilder::addAssociation(const AssociationDefinition &definit
         .debugName = definition.debugName,
         .type = ValueType::UInt64,
         .index = IndexKind::Normal,
-        .nullable = true,
+        .nullable = definition.nullable,
     };
     auto column = addColumnRecord(_impl->builder, container, std::move(columnRecord));
 

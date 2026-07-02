@@ -76,7 +76,7 @@ struct DINI_EXPORT ComputedColumnDefinition {
  * @brief Identifies the table or list that an association may reference.
  *
  * AssociationTarget is a schema-time descriptor. Runtime parent or list
- * membership is still stored as a normal nullable relation column value.
+ * membership is still stored as a normal relation column value.
  */
 using AssociationTarget = std::variant<TableHandle, ListHandle>;
 
@@ -84,12 +84,13 @@ using AssociationTarget = std::variant<TableHandle, ListHandle>;
  * @brief Describes a schema-declared association or composition relation.
  *
  * All parent-child relations are composition relations. The relation column is
- * nullable, participates in cascade delete and cycle checks, and is updated using
- * the same transaction and ChangeSet semantics as a normal column.
+ * nullable by default, participates in cascade delete and cycle checks, and is
+ * updated using the same transaction and ChangeSet semantics as a normal column.
  */
 struct DINI_EXPORT AssociationDefinition {
     std::string debugName;
     AssociationTarget target;
+    bool nullable = true;
 };
 
 /**
