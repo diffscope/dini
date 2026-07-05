@@ -156,6 +156,17 @@ public:
     void update(ItemId itemId, ColumnHandle column, Value value, AssociationUpdateOptions options = {});
 
     /**
+     * @brief Updates multiple normal column values atomically from inside an allowed hook.
+     *
+     * @param itemId Item to update.
+     * @param values Column/value pairs to update together.
+     * @pre The context must be in a BeforeApply hook and every column must be writable for the item.
+     * @post The new values are visible together and computed columns are updated from the final state.
+     * @throws HookError if mutation is forbidden in the current hook stage.
+     */
+    void update(ItemId itemId, std::vector<ColumnValue> values);
+
+    /**
      * @brief Rotates a range inside one list instance from inside an allowed hook.
      *
      * @param list Target list.
@@ -331,6 +342,17 @@ public:
      * @throws TransactionError if the transaction is inactive or failed.
      */
     void update(ItemId itemId, ColumnHandle column, Value value, AssociationUpdateOptions options = {});
+
+    /**
+     * @brief Updates multiple writable column values atomically.
+     *
+     * @param itemId Item to update.
+     * @param values Column/value pairs to update together.
+     * @pre The transaction must be active and every column must be legal for the item.
+     * @post The new values are visible together and dependent computed columns are updated from the final state.
+     * @throws TransactionError if the transaction is inactive or failed.
+     */
+    void update(ItemId itemId, std::vector<ColumnValue> values);
 
     /**
      * @brief Rotates a range inside one list instance.

@@ -52,6 +52,7 @@ struct Transaction::Impl {
     ItemSnapshot *pendingBeforeApplySnapshot = nullptr;
     bool pendingBeforeApplyInsert = false;
     ColumnId pendingBeforeApplyPrimaryColumn = 0;
+    std::vector<ColumnId> pendingBeforeApplyPrimaryColumns;
     std::unordered_map<ItemId, RuntimeItem> rollbackItems;
     std::map<std::pair<ContainerId, std::string>, std::vector<ItemId>> rollbackListGroups;
     RuntimeIndexStore rollbackIndexes;

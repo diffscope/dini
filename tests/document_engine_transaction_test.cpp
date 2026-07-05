@@ -107,6 +107,101 @@ TEST(DocumentEngineTransactionTest, TransactionRollbackRevertsChanges)
     EXPECT_FALSE(engine.contains(newId));
 }
 
+TEST(DocumentEngineTransactionTest, MultiColumnUpdateChangesValues)
+{
+    auto s = buildItemSchema();
+    DocumentEngine engine(s.schema);
+    ItemId initialId = seedInitialRow(engine, s);
+
+    auto t = engine.beginTransaction();
+    t.update(initialId, std::vector<ColumnValue> {
+        ColumnValue {.column = s.name, .value = Value("updated")},
+        ColumnValue {.column = s.value, .value = Value(std::int64_t {42})},
+    });
+    auto result = t.commit();
+
+    EXPECT_EQ(engine.read(initialId, s.name).asString(), "updated");
+    EXPECT_EQ(engine.read(initialId, s.value).asInt64(), 42);
+
+    const auto &operations = result.changeSet.operations();
+    ASSERT_EQ(operations.size(), 2U);
+
+    bool sawNameUpdate = false;
+    bool sawValueUpdate = false;
+    for (const auto &operation : operations) {
+        ASSERT_EQ(operation.kind(), ChangeOperationKind::ColumnUpdated);
+        const auto &updated = std::get<ColumnUpdatedChange>(operation.payload());
+        if (updated.column == s.name) {
+            sawNameUpdate = true;
+            EXPECT_EQ(updated.oldValue.asString(), "initial");
+            EXPECT_EQ(updated.newValue.asString(), "updated");
+        } else if (updated.column == s.value) {
+            sawValueUpdate = true;
+            EXPECT_EQ(updated.oldValue.asInt64(), 0);
+            EXPECT_EQ(updated.newValue.asInt64(), 42);
+        }
+    }
+    EXPECT_TRUE(sawNameUpdate);
+    EXPECT_TRUE(sawValueUpdate);
+}
+
+TEST(DocumentEngineTransactionTest, MultiColumnUpdateRunsHooksAtomically)
+{
+    bool hookSawAtomicUpdate = false;
+
+    SchemaBuilder builder;
+    auto table = builder.createTable("Item");
+    auto left = table.addColumn(int64Column("left", IndexKind::Normal));
+    auto right = table.addColumn(int64Column("right", IndexKind::Normal));
+    table.addHook(HookDefinition {
+        .stage = HookStage::BeforeApply,
+        .callback = [left, right, &hookSawAtomicUpdate](TransactionContext &, const ChangeSet &changeSet) {
+            bool sawLeft = false;
+            bool sawRight = false;
+            for (const auto &operation : changeSet.operations()) {
+                if (operation.kind() != ChangeOperationKind::ColumnUpdated) {
+                    continue;
+                }
+                const auto &updated = std::get<ColumnUpdatedChange>(operation.payload());
+                if (updated.column == left) {
+                    sawLeft = true;
+                } else if (updated.column == right) {
+                    sawRight = true;
+                }
+            }
+            if (sawLeft || sawRight) {
+                if (!sawLeft || !sawRight) {
+                    throw ConstraintError("multi-column update was observed one column at a time");
+                }
+                hookSawAtomicUpdate = true;
+            }
+        },
+    });
+    auto schema = builder.freeze();
+    DocumentEngine engine(schema);
+
+    ItemId itemId = 0;
+    {
+        auto t = engine.beginTransaction();
+        itemId = t.insert(table.handle(), {
+            ColumnValue {.column = left, .value = Value(std::int64_t {1})},
+            ColumnValue {.column = right, .value = Value(std::int64_t {2})},
+        });
+        t.commit();
+    }
+
+    auto t = engine.beginTransaction();
+    t.update(itemId, std::vector<ColumnValue> {
+        ColumnValue {.column = left, .value = Value(std::int64_t {10})},
+        ColumnValue {.column = right, .value = Value(std::int64_t {20})},
+    });
+    t.commit();
+
+    EXPECT_TRUE(hookSawAtomicUpdate);
+    EXPECT_EQ(engine.read(itemId, left).asInt64(), 10);
+    EXPECT_EQ(engine.read(itemId, right).asInt64(), 20);
+}
+
 TEST(DocumentEngineTransactionTest, TransactionRollbackInsert)
 {
     auto s = buildItemSchema();

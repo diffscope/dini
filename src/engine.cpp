@@ -754,6 +754,7 @@ namespace dini {
         ItemSnapshot *previousSnapshot = nullptr;
         bool previousInsert = false;
         ColumnId previousPrimaryColumn = 0;
+        std::vector<ColumnId> previousPrimaryColumns;
 
         PendingBeforeApplyScope(Transaction::Impl &transaction,
                                 ItemSnapshot &snapshot,
@@ -762,11 +763,32 @@ namespace dini {
             : transaction(transaction),
               previousSnapshot(transaction.pendingBeforeApplySnapshot),
               previousInsert(transaction.pendingBeforeApplyInsert),
-              previousPrimaryColumn(transaction.pendingBeforeApplyPrimaryColumn)
+              previousPrimaryColumn(transaction.pendingBeforeApplyPrimaryColumn),
+              previousPrimaryColumns(transaction.pendingBeforeApplyPrimaryColumns)
         {
             transaction.pendingBeforeApplySnapshot = &snapshot;
             transaction.pendingBeforeApplyInsert = insert;
             transaction.pendingBeforeApplyPrimaryColumn = primaryColumn;
+            transaction.pendingBeforeApplyPrimaryColumns.clear();
+            if (primaryColumn != 0) {
+                transaction.pendingBeforeApplyPrimaryColumns.push_back(primaryColumn);
+            }
+        }
+
+        PendingBeforeApplyScope(Transaction::Impl &transaction,
+                                ItemSnapshot &snapshot,
+                                bool insert,
+                                std::vector<ColumnId> primaryColumns)
+            : transaction(transaction),
+              previousSnapshot(transaction.pendingBeforeApplySnapshot),
+              previousInsert(transaction.pendingBeforeApplyInsert),
+              previousPrimaryColumn(transaction.pendingBeforeApplyPrimaryColumn),
+              previousPrimaryColumns(transaction.pendingBeforeApplyPrimaryColumns)
+        {
+            transaction.pendingBeforeApplySnapshot = &snapshot;
+            transaction.pendingBeforeApplyInsert = insert;
+            transaction.pendingBeforeApplyPrimaryColumn = primaryColumns.empty() ? 0 : primaryColumns.front();
+            transaction.pendingBeforeApplyPrimaryColumns = std::move(primaryColumns);
         }
 
         ~PendingBeforeApplyScope()
@@ -774,6 +796,7 @@ namespace dini {
             transaction.pendingBeforeApplySnapshot = previousSnapshot;
             transaction.pendingBeforeApplyInsert = previousInsert;
             transaction.pendingBeforeApplyPrimaryColumn = previousPrimaryColumn;
+            transaction.pendingBeforeApplyPrimaryColumns = std::move(previousPrimaryColumns);
         }
     };
 
@@ -875,6 +898,41 @@ namespace dini {
         return operationChange;
     }
 
+    ChangeSet updateChangeSetForSnapshot(const SchemaDefinitionData &schemaDefinition,
+                                         const ItemSnapshot &oldSnapshot,
+                                         ItemId itemId,
+                                         const std::vector<ColumnValue> &updates,
+                                         const std::vector<Value> &oldValues,
+                                         ItemSnapshot &snapshot)
+    {
+        resetComputedColumnValues(schemaDefinition, oldSnapshot, snapshot);
+        auto computedChanges = recomputeComputedColumns(schemaDefinition, snapshot);
+        ChangeSet operationChange;
+        for (std::size_t i = 0; i < updates.size(); ++i) {
+            operationChange.append(ChangeOperation(ColumnUpdatedChange {
+                .itemId = itemId,
+                .column = updates[i].column,
+                .oldValue = oldValues[i],
+                .newValue = updates[i].value,
+                .oldListIndex = oldSnapshot.listIndex,
+            }));
+        }
+        for (const auto &change : computedChanges) {
+            operationChange.append(ChangeOperation(change));
+        }
+        return operationChange;
+    }
+
+    bool isPendingBeforeApplyPrimaryColumn(const Transaction::Impl &transaction, ColumnId column)
+    {
+        if (!transaction.pendingBeforeApplyPrimaryColumns.empty()) {
+            return std::find(transaction.pendingBeforeApplyPrimaryColumns.begin(),
+                             transaction.pendingBeforeApplyPrimaryColumns.end(),
+                             column) != transaction.pendingBeforeApplyPrimaryColumns.end();
+        }
+        return transaction.pendingBeforeApplyPrimaryColumn == column;
+    }
+
     bool updatePendingBeforeApplySource(Transaction::Impl &transaction,
                                         ItemId itemId,
                                         ColumnHandle column,
@@ -898,7 +956,7 @@ namespace dini {
             throw ConstraintError("pending source updates only support normal columns");
         }
         if (!transaction.pendingBeforeApplyInsert &&
-            transaction.pendingBeforeApplyPrimaryColumn == column.columnId()) {
+            isPendingBeforeApplyPrimaryColumn(transaction, column.columnId())) {
             throw ConstraintError("pending source update cannot overwrite the triggering column");
         }
         validateValueForColumn(columnRecord, value);
@@ -920,6 +978,58 @@ namespace dini {
             const auto derivedIndex = transaction.changeSet.operations().size();
             appendWithDerivedLinks(transaction, operationChange, derivedIndex, derivedIndex);
         }
+        return true;
+    }
+
+    bool updatePendingBeforeApplySource(Transaction::Impl &transaction,
+                                        ItemId itemId,
+                                        const std::vector<ColumnValue> &values)
+    {
+        auto *engine = transaction.engine;
+        auto *snapshot = transaction.pendingBeforeApplySnapshot;
+        if (!engine || !snapshot || engine->hookStage != HookStage::BeforeApply || snapshot->id != itemId) {
+            return false;
+        }
+        const auto &schemaDefinition = schemaData(engine->schema);
+        const auto sourceSnapshot = *snapshot;
+        auto updatedSnapshot = *snapshot;
+        std::vector<Value> oldValues;
+        oldValues.reserve(values.size());
+        std::vector<ColumnId> seenColumns;
+        seenColumns.reserve(values.size());
+        for (const auto &columnValue : values) {
+            const auto &column = columnValue.column;
+            if (updatedSnapshot.containerId != column.containerId()) {
+                throw QueryError("column does not belong to item");
+            }
+            const auto &columnRecord = columnFor(schemaDefinition, column);
+            if (columnRecord.info.computed || columnRecord.info.association) {
+                throw ConstraintError("pending source updates only support normal columns");
+            }
+            if (!transaction.pendingBeforeApplyInsert &&
+                isPendingBeforeApplyPrimaryColumn(transaction, column.columnId())) {
+                throw ConstraintError("pending source update cannot overwrite the triggering column");
+            }
+            if (std::find(seenColumns.begin(), seenColumns.end(), column.columnId()) != seenColumns.end()) {
+                throw ConstraintError("duplicate column update");
+            }
+            seenColumns.push_back(column.columnId());
+            validateValueForColumn(columnRecord, columnValue.value);
+            oldValues.push_back(valueForColumn(updatedSnapshot, column.columnId()));
+            setColumnValue(updatedSnapshot, column, columnValue.value);
+        }
+        validateSnapshot(*engine, updatedSnapshot);
+        if (!transaction.pendingBeforeApplyInsert && !values.empty()) {
+            auto operationChange = updateChangeSetForSnapshot(schemaDefinition,
+                                                              sourceSnapshot,
+                                                              itemId,
+                                                              values,
+                                                              oldValues,
+                                                              updatedSnapshot);
+            const auto derivedIndex = transaction.changeSet.operations().size();
+            appendWithDerivedLinks(transaction, operationChange, derivedIndex, derivedIndex);
+        }
+        *snapshot = updatedSnapshot;
         return true;
     }
 
@@ -2281,6 +2391,22 @@ void TransactionContext::update(ItemId itemId, ColumnHandle column, Value value,
     }
 }
 
+void TransactionContext::update(ItemId itemId, std::vector<ColumnValue> values)
+{
+    if (!_impl || !_impl->mutationAllowed) {
+        throw HookError("mutation is not allowed in this hook stage");
+    }
+    Transaction transaction(std::make_unique<Transaction::Impl>(*_impl->transaction));
+    try {
+        transaction.update(itemId, std::move(values));
+        *_impl->transaction = *transaction._impl;
+        transaction._impl->state = TransactionState::Committed;
+    } catch (...) {
+        markFailed(*_impl->transaction);
+        throw;
+    }
+}
+
 void TransactionContext::rotate(ListHandle list, Value associationValue, ListRotation rotation)
 {
     if (!_impl || !_impl->mutationAllowed) {
@@ -2654,6 +2780,109 @@ void Transaction::update(ItemId itemId, ColumnHandle column, Value value, Associ
                                                      value,
                                                      options,
                                                      oldSnapshot.listIndex,
+                                                     snapshot);
+        removeItemFromIndexes(engine, oldSnapshot);
+        removeFromListGroup(engine, oldSnapshot);
+        it->second.snapshot = snapshot;
+        insertIntoListGroup(engine, snapshot);
+        addItemToIndexes(engine, snapshot);
+        appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
+        auto afterContext = makeContext();
+        runHooks(engine, HookStage::AfterApply, afterContext, operationChange, false);
+        publish(engine, EventKind::AfterApply, _impl->origin, operationChange);
+    } catch (...) {
+        markFailed(*_impl);
+        throw;
+    }
+}
+
+void Transaction::update(ItemId itemId, std::vector<ColumnValue> values)
+{
+    requireActive(_impl.get());
+    auto &engine = *_impl->engine;
+    try {
+        for (const auto &columnValue : values) {
+            engine.schema.validate(columnValue.column);
+        }
+        if (updatePendingBeforeApplySource(*_impl, itemId, values)) {
+            return;
+        }
+        if (values.empty()) {
+            return;
+        }
+        auto makeContext = [&]() {
+            auto data = std::make_unique<TransactionContext::Impl>();
+            data->transaction = _impl.get();
+            data->origin = _impl->origin;
+            return TransactionContext(std::move(data));
+        };
+        auto it = engine.items.find(itemId);
+        if (it == engine.items.end()) {
+            throw QueryError("item does not exist");
+        }
+        auto snapshot = it->second.snapshot;
+        auto oldSnapshot = snapshot;
+        const auto &schemaDefinition = schemaData(engine.schema);
+        std::vector<Value> oldValues;
+        oldValues.reserve(values.size());
+        std::vector<ColumnId> seenColumns;
+        seenColumns.reserve(values.size());
+        std::vector<ColumnId> primaryColumns;
+        primaryColumns.reserve(values.size());
+
+        for (const auto &columnValue : values) {
+            const auto &column = columnValue.column;
+            if (snapshot.containerId != column.containerId()) {
+                throw QueryError("column does not belong to item");
+            }
+            const auto &columnRecord = columnFor(schemaDefinition, column);
+            if (columnRecord.info.computed) {
+                throw ConstraintError("computed columns are not writable");
+            }
+            if (std::find(seenColumns.begin(), seenColumns.end(), column.columnId()) != seenColumns.end()) {
+                throw ConstraintError("duplicate column update");
+            }
+            seenColumns.push_back(column.columnId());
+            primaryColumns.push_back(column.columnId());
+            validateValueForColumn(columnRecord, columnValue.value);
+            oldValues.push_back(valueForColumn(snapshot, column.columnId()));
+            setColumnValue(snapshot, column, columnValue.value);
+
+            auto relation = findRelationByColumn(const_cast<SchemaDefinitionData &>(schemaDefinition),
+                                                 column.containerId(),
+                                                 column.columnId());
+            if (relation && snapshot.containerKind == ContainerKind::List &&
+                containerFor(schemaDefinition, snapshot.containerId).listAssociation == relation->info.id) {
+                if (columnValue.value.isNull()) {
+                    snapshot.listAssociationValue.reset();
+                    snapshot.listIndex.reset();
+                } else {
+                    throw ConstraintError("target index is required when assigning a list association");
+                }
+            }
+        }
+
+        applyRelationMetadata(schemaDefinition, snapshot);
+        validateSnapshot(engine, snapshot);
+        auto operationChange = updateChangeSetForSnapshot(schemaDefinition,
+                                                          oldSnapshot,
+                                                          itemId,
+                                                          values,
+                                                          oldValues,
+                                                          snapshot);
+        auto beforeContext = makeContext();
+        beforeContext._impl->mutationAllowed = true;
+        const auto derivedStart = _impl->changeSet.operations().size();
+        {
+            PendingBeforeApplyScope pending(*_impl, snapshot, false, std::move(primaryColumns));
+            runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
+        }
+        const auto derivedEnd = _impl->changeSet.operations().size();
+        operationChange = updateChangeSetForSnapshot(schemaDefinition,
+                                                     oldSnapshot,
+                                                     itemId,
+                                                     values,
+                                                     oldValues,
                                                      snapshot);
         removeItemFromIndexes(engine, oldSnapshot);
         removeFromListGroup(engine, oldSnapshot);
