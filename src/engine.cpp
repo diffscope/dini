@@ -444,13 +444,16 @@ namespace dini {
         }
     }
 
-    void refreshListIndexes(DocumentEngine::Impl &engine, ContainerId listId, const std::string &associationKey)
+    void refreshListIndexes(DocumentEngine::Impl &engine,
+                            ContainerId listId,
+                            const std::string &associationKey,
+                            std::size_t startIndex = 0)
     {
         auto groupIt = engine.listGroups.find({listId, associationKey});
         if (groupIt == engine.listGroups.end()) {
             return;
         }
-        for (std::size_t i = 0; i < groupIt->second.size(); ++i) {
+        for (std::size_t i = startIndex; i < groupIt->second.size(); ++i) {
             auto itemIt = engine.items.find(groupIt->second[i]);
             if (itemIt != engine.items.end()) {
                 itemIt->second.snapshot.listIndex = i;
@@ -458,10 +461,30 @@ namespace dini {
         }
     }
 
+    bool participatesInListGroup(const ItemSnapshot &snapshot)
+    {
+        return snapshot.containerKind == ContainerKind::List && snapshot.listAssociationValue &&
+               !snapshot.listAssociationValue->isNull();
+    }
+
+    bool listGroupMembershipChanged(const ItemSnapshot &oldSnapshot, const ItemSnapshot &newSnapshot)
+    {
+        const auto oldParticipates = participatesInListGroup(oldSnapshot);
+        const auto newParticipates = participatesInListGroup(newSnapshot);
+        if (oldParticipates != newParticipates) {
+            return true;
+        }
+        if (!oldParticipates) {
+            return false;
+        }
+        return oldSnapshot.containerId != newSnapshot.containerId ||
+               oldSnapshot.listAssociationValue != newSnapshot.listAssociationValue ||
+               oldSnapshot.listIndex != newSnapshot.listIndex;
+    }
+
     void removeFromListGroup(DocumentEngine::Impl &engine, const ItemSnapshot &snapshot)
     {
-        if (snapshot.containerKind != ContainerKind::List || !snapshot.listAssociationValue ||
-            snapshot.listAssociationValue->isNull()) {
+        if (!participatesInListGroup(snapshot)) {
             return;
         }
         const auto key = valueKey(*snapshot.listAssociationValue);
@@ -470,14 +493,23 @@ namespace dini {
             return;
         }
         auto &group = groupIt->second;
-        group.erase(std::remove(group.begin(), group.end(), snapshot.id), group.end());
-        refreshListIndexes(engine, snapshot.containerId, key);
+        std::size_t index = group.size();
+        if (snapshot.listIndex && *snapshot.listIndex < group.size() && group[*snapshot.listIndex] == snapshot.id) {
+            index = *snapshot.listIndex;
+        } else {
+            auto it = std::find(group.begin(), group.end(), snapshot.id);
+            if (it == group.end()) {
+                return;
+            }
+            index = static_cast<std::size_t>(std::distance(group.begin(), it));
+        }
+        group.erase(group.begin() + static_cast<std::ptrdiff_t>(index));
+        refreshListIndexes(engine, snapshot.containerId, key, index);
     }
 
     void insertIntoListGroup(DocumentEngine::Impl &engine, const ItemSnapshot &snapshot)
     {
-        if (snapshot.containerKind != ContainerKind::List || !snapshot.listAssociationValue ||
-            snapshot.listAssociationValue->isNull()) {
+        if (!participatesInListGroup(snapshot)) {
             return;
         }
         const auto key = valueKey(*snapshot.listAssociationValue);
@@ -487,7 +519,18 @@ namespace dini {
             throw ConstraintError("list insertion index is out of range");
         }
         group.insert(group.begin() + static_cast<std::ptrdiff_t>(index), snapshot.id);
-        refreshListIndexes(engine, snapshot.containerId, key);
+        refreshListIndexes(engine, snapshot.containerId, key, index + 1);
+    }
+
+    void updateListGroup(DocumentEngine::Impl &engine,
+                         const ItemSnapshot &oldSnapshot,
+                         const ItemSnapshot &newSnapshot)
+    {
+        if (!listGroupMembershipChanged(oldSnapshot, newSnapshot)) {
+            return;
+        }
+        removeFromListGroup(engine, oldSnapshot);
+        insertIntoListGroup(engine, newSnapshot);
     }
 
     void publish(DocumentEngine::Impl &engine, EventKind kind, EventOrigin origin, const ChangeSet &changeSet)
@@ -561,6 +604,9 @@ namespace dini {
                   const ChangeSet &changeSet,
                   bool mutationAllowed)
     {
+        if (changeSet.empty()) {
+            return;
+        }
         if (engine.hookDepth >= maxHookDepth) {
             throw HookError("maximum hook recursion depth exceeded");
         }
@@ -572,15 +618,22 @@ namespace dini {
         const auto &schemaDefinition = schemaData(engine.schema);
         const auto containers = affectedContainers(changeSet);
         try {
-            for (const auto &container : schemaDefinition.containers) {
-                if (containers.find(container.info.id) == containers.end()) {
+            for (const auto containerId : containers) {
+                const auto *container = findContainer(schemaDefinition, containerId);
+                if (!container) {
                     continue;
                 }
-                auto scopedChangeSet = changeSetForContainer(changeSet, container.info.id);
+                const auto hasHooks = std::any_of(container->hooks.begin(), container->hooks.end(), [&](const auto &hook) {
+                    return hook.stage == stage && hook.callback;
+                });
+                if (!hasHooks) {
+                    continue;
+                }
+                auto scopedChangeSet = changeSetForContainer(changeSet, container->info.id);
                 if (scopedChangeSet.empty()) {
                     continue;
                 }
-                for (const auto &hook : container.hooks) {
+                for (const auto &hook : container->hooks) {
                     if (hook.stage == stage && hook.callback) {
                         hook.callback(context, scopedChangeSet);
                     }
@@ -1277,9 +1330,8 @@ namespace dini {
                     }
                     applyRelationMetadata(schemaDefinition, snapshot);
                     validateSnapshot(engine, snapshot, &oldSnapshot);
-                    removeFromListGroup(engine, oldSnapshot);
+                    updateListGroup(engine, oldSnapshot, snapshot);
                     it->second.snapshot = snapshot;
-                    insertIntoListGroup(engine, snapshot);
                     updateItemInIndexes(engine, oldSnapshot, snapshot);
                 } else if constexpr (std::is_same_v<T, ComputedColumnUpdatedChange>) {
                     engine.schema.validate(change.column);
@@ -1307,7 +1359,7 @@ namespace dini {
                             shift += static_cast<std::ptrdiff_t>(change.rotation.count);
                         }
                         std::rotate(first, first + shift, last);
-                        refreshListIndexes(engine, change.list.containerId(), key);
+                        refreshListIndexes(engine, change.list.containerId(), key, change.rotation.startIndex);
                     }
                 }
             },
@@ -2255,6 +2307,22 @@ namespace dini {
             }
         }
 
+        if (useListDefaultOrder && spec.sortKeys.empty()) {
+            const auto parentSelection = parentSelectionForExpression(containerId, spec.filter);
+            if (parentSelection && parentSelection->values.size() == 1) {
+                const auto groupIt = engine.listGroups.find({containerId, valueKey(parentSelection->values.front())});
+                if (groupIt == engine.listGroups.end()) {
+                    return;
+                }
+                for (const auto id : groupIt->second) {
+                    if (!emitId(id)) {
+                        return;
+                    }
+                }
+                return;
+            }
+        }
+
         std::vector<ItemSnapshot> materialized;
         const auto &ids = candidates ? *candidates : engine.indexes.containerItems(containerId);
         materialized.reserve(ids.size());
@@ -2412,7 +2480,11 @@ ItemSnapshot DocumentEngine::read(ItemId itemId) const
 Value DocumentEngine::read(ItemId itemId, ColumnHandle column) const
 {
     _impl->schema.validate(column);
-    const auto snapshot = read(itemId);
+    auto it = _impl->items.find(itemId);
+    if (it == _impl->items.end()) {
+        throw QueryError("item does not exist");
+    }
+    const auto &snapshot = it->second.snapshot;
     if (snapshot.containerId != column.containerId()) {
         throw QueryError("column does not belong to item container");
     }
@@ -2908,13 +2980,91 @@ void TransactionContext::update(ItemId itemId, ColumnHandle column, Value value,
     if (!_impl || !_impl->mutationAllowed) {
         throw HookError("mutation is not allowed in this hook stage");
     }
-    Transaction transaction(std::make_unique<Transaction::Impl>(*_impl->transaction));
+    auto &transaction = *_impl->transaction;
+    requireActive(&transaction);
+    auto &engine = *transaction.engine;
     try {
-        transaction.update(itemId, std::move(column), std::move(value), options);
-        *_impl->transaction = *transaction._impl;
-        transaction._impl->state = TransactionState::Committed;
+        engine.schema.validate(column);
+        if (updatePendingBeforeApplySource(transaction, itemId, column, value, options)) {
+            return;
+        }
+        auto makeContext = [&]() {
+            auto data = std::make_unique<TransactionContext::Impl>();
+            data->transaction = &transaction;
+            data->origin = transaction.origin;
+            return TransactionContext(std::move(data));
+        };
+        auto it = engine.items.find(itemId);
+        if (it == engine.items.end()) {
+            throw QueryError("item does not exist");
+        }
+        auto snapshot = it->second.snapshot;
+        if (snapshot.containerId != column.containerId()) {
+            throw QueryError("column does not belong to item");
+        }
+        const auto &schemaDefinition = schemaData(engine.schema);
+        const auto &columnRecord = columnFor(schemaDefinition, column);
+        if (columnRecord.info.computed) {
+            throw ConstraintError("computed columns are not writable");
+        }
+        validateValueForColumn(columnRecord, value);
+        auto oldValue = valueForColumn(snapshot, column.columnId());
+        auto oldSnapshot = snapshot;
+        auto relation = findRelationByColumn(const_cast<SchemaDefinitionData &>(schemaDefinition),
+                                             column.containerId(),
+                                             column.columnId());
+        setColumnValue(snapshot, column, value);
+        if (relation && snapshot.containerKind == ContainerKind::List &&
+            containerFor(schemaDefinition, snapshot.containerId).listAssociation == relation->info.id) {
+            if (value.isNull()) {
+                snapshot.listAssociationValue.reset();
+                snapshot.listIndex.reset();
+            } else {
+                if (!options.targetIndex) {
+                    throw ConstraintError("target index is required when assigning a list association");
+                }
+                snapshot.listAssociationValue = value;
+                snapshot.listIndex = *options.targetIndex;
+            }
+        }
+        applyRelationMetadata(schemaDefinition, snapshot);
+        validateSnapshot(engine, snapshot, &oldSnapshot);
+        auto operationChange = updateChangeSetForSnapshot(schemaDefinition,
+                                                          oldSnapshot,
+                                                          itemId,
+                                                          column,
+                                                          oldValue,
+                                                          value,
+                                                          options,
+                                                          oldSnapshot.listIndex,
+                                                          snapshot);
+        auto beforeContext = makeContext();
+        beforeContext._impl->mutationAllowed = true;
+        const auto derivedStart = transaction.changeSet.operations().size();
+        {
+            PendingBeforeApplyScope pending(transaction, snapshot, false, column.columnId());
+            runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
+        }
+        const auto derivedEnd = transaction.changeSet.operations().size();
+        operationChange = updateChangeSetForSnapshot(schemaDefinition,
+                                                     oldSnapshot,
+                                                     itemId,
+                                                     column,
+                                                     oldValue,
+                                                     value,
+                                                     options,
+                                                     oldSnapshot.listIndex,
+                                                     snapshot);
+        recordRollbackForSnapshotUpdate(transaction, oldSnapshot, snapshot);
+        updateListGroup(engine, oldSnapshot, snapshot);
+        it->second.snapshot = snapshot;
+        updateItemInIndexes(engine, oldSnapshot, snapshot);
+        appendWithDerivedLinks(transaction, operationChange, derivedStart, derivedEnd);
+        auto afterContext = makeContext();
+        runHooks(engine, HookStage::AfterApply, afterContext, operationChange, false);
+        publish(engine, EventKind::AfterApply, transaction.origin, operationChange);
     } catch (...) {
-        markFailed(*_impl->transaction);
+        markFailed(transaction);
         throw;
     }
 }
@@ -3317,9 +3467,8 @@ void Transaction::update(ItemId itemId, ColumnHandle column, Value value, Associ
                                                      oldSnapshot.listIndex,
                                                      snapshot);
         recordRollbackForSnapshotUpdate(*_impl, oldSnapshot, snapshot);
-        removeFromListGroup(engine, oldSnapshot);
+        updateListGroup(engine, oldSnapshot, snapshot);
         it->second.snapshot = snapshot;
-        insertIntoListGroup(engine, snapshot);
         updateItemInIndexes(engine, oldSnapshot, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
@@ -3420,9 +3569,8 @@ void Transaction::update(ItemId itemId, std::vector<ColumnValue> values)
                                                      oldValues,
                                                      snapshot);
         recordRollbackForSnapshotUpdate(*_impl, oldSnapshot, snapshot);
-        removeFromListGroup(engine, oldSnapshot);
+        updateListGroup(engine, oldSnapshot, snapshot);
         it->second.snapshot = snapshot;
-        insertIntoListGroup(engine, snapshot);
         updateItemInIndexes(engine, oldSnapshot, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
@@ -3473,7 +3621,7 @@ void Transaction::rotate(ListHandle list, Value associationValue, ListRotation r
                 shift += static_cast<std::ptrdiff_t>(rotation.count);
             }
             std::rotate(first, first + shift, last);
-            refreshListIndexes(engine, list.containerId(), key);
+            refreshListIndexes(engine, list.containerId(), key, rotation.startIndex);
         }
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
