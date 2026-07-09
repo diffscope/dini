@@ -34,12 +34,30 @@ struct RangeIndexDefinitionRecord {
     std::vector<ColumnHandle> columns;
 };
 
+struct OrderedIndexDefinitionRecord {
+    OrderedIndexHandle handle;
+    std::string debugName;
+    std::vector<ColumnHandle> groupBy;
+    std::vector<ColumnHandle> orderBy;
+    bool tieBreakById = true;
+};
+
+struct IntervalIndexDefinitionRecord {
+    IntervalIndexHandle handle;
+    std::string debugName;
+    std::vector<ColumnHandle> groupBy;
+    ColumnHandle start;
+    ColumnHandle end;
+};
+
 struct ContainerDefinitionRecord {
     ContainerInfo info;
     std::vector<ColumnDefinitionRecord> columns;
     std::vector<RelationDefinitionRecord> relations;
     std::vector<VariantDefinitionRecord> variants;
     std::vector<RangeIndexDefinitionRecord> rangeIndexes;
+    std::vector<OrderedIndexDefinitionRecord> orderedIndexes;
+    std::vector<IntervalIndexDefinitionRecord> intervalIndexes;
     std::vector<HookDefinition> hooks;
     std::optional<RelationId> listAssociation;
 };
@@ -51,6 +69,8 @@ struct SchemaDefinitionData : SharedData {
     ColumnId nextColumnId = 1;
     RelationId nextRelationId = 1;
     VariantId nextVariantId = 1;
+    std::uint32_t nextOrderedIndexId = 1;
+    std::uint32_t nextIntervalIndexId = 1;
     std::vector<ContainerDefinitionRecord> containers;
 };
 
@@ -85,6 +105,10 @@ RelationDefinitionRecord *findRelation(SchemaDefinitionData &data, ContainerId c
 const RelationDefinitionRecord *findRelation(const SchemaDefinitionData &data, ContainerId containerId, RelationId relationId);
 RelationDefinitionRecord *findRelationByColumn(SchemaDefinitionData &data, ContainerId containerId, ColumnId columnId);
 const RelationDefinitionRecord *findRelationByColumn(const SchemaDefinitionData &data, ContainerId containerId, ColumnId columnId);
+OrderedIndexDefinitionRecord *findOrderedIndex(SchemaDefinitionData &data, ContainerId containerId, std::uint32_t indexId);
+const OrderedIndexDefinitionRecord *findOrderedIndex(const SchemaDefinitionData &data, ContainerId containerId, std::uint32_t indexId);
+IntervalIndexDefinitionRecord *findIntervalIndex(SchemaDefinitionData &data, ContainerId containerId, std::uint32_t indexId);
+const IntervalIndexDefinitionRecord *findIntervalIndex(const SchemaDefinitionData &data, ContainerId containerId, std::uint32_t indexId);
 const SchemaDefinitionData &schemaData(const EngineSchema &schema);
 
 } // namespace dini

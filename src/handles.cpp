@@ -288,4 +288,118 @@ bool operator==(const VariantHandle &lhs, const VariantHandle &rhs)
            std::make_tuple(rhs.schemaId(), rhs.containerId(), rhs.variantId(), rhs.debugName());
 }
 
+OrderedIndexHandle::OrderedIndexHandle() noexcept : _impl(new Impl(this)) {}
+
+OrderedIndexHandle::OrderedIndexHandle(SchemaId schemaId,
+                                       ContainerId containerId,
+                                       std::uint32_t indexId,
+                                       std::string debugName)
+    : _impl(new Impl(this))
+{
+    __stdc_impl_t;
+    impl.schemaId = schemaId;
+    impl.containerId = containerId;
+    impl.indexId = indexId;
+    impl.debugName = std::move(debugName);
+}
+
+OrderedIndexHandle::~OrderedIndexHandle() = default;
+OrderedIndexHandle::OrderedIndexHandle(const OrderedIndexHandle &other) = default;
+OrderedIndexHandle::OrderedIndexHandle(OrderedIndexHandle &&other) noexcept = default;
+OrderedIndexHandle &OrderedIndexHandle::operator=(const OrderedIndexHandle &other) = default;
+OrderedIndexHandle &OrderedIndexHandle::operator=(OrderedIndexHandle &&other) noexcept = default;
+
+bool OrderedIndexHandle::isValid() const noexcept
+{
+    __stdc_impl_t;
+    return validContainerHandle(impl) && impl.indexId != 0;
+}
+
+SchemaId OrderedIndexHandle::schemaId() const noexcept
+{
+    __stdc_impl_t;
+    return impl.schemaId;
+}
+
+ContainerId OrderedIndexHandle::containerId() const noexcept
+{
+    __stdc_impl_t;
+    return impl.containerId;
+}
+
+std::uint32_t OrderedIndexHandle::indexId() const noexcept
+{
+    __stdc_impl_t;
+    return impl.indexId;
+}
+
+const std::string &OrderedIndexHandle::debugName() const noexcept
+{
+    __stdc_impl_t;
+    return debugNameOf(impl);
+}
+
+bool operator==(const OrderedIndexHandle &lhs, const OrderedIndexHandle &rhs)
+{
+    return std::make_tuple(lhs.schemaId(), lhs.containerId(), lhs.indexId(), lhs.debugName()) ==
+           std::make_tuple(rhs.schemaId(), rhs.containerId(), rhs.indexId(), rhs.debugName());
+}
+
+IntervalIndexHandle::IntervalIndexHandle() noexcept : _impl(new Impl(this)) {}
+
+IntervalIndexHandle::IntervalIndexHandle(SchemaId schemaId,
+                                         ContainerId containerId,
+                                         std::uint32_t indexId,
+                                         std::string debugName)
+    : _impl(new Impl(this))
+{
+    __stdc_impl_t;
+    impl.schemaId = schemaId;
+    impl.containerId = containerId;
+    impl.indexId = indexId;
+    impl.debugName = std::move(debugName);
+}
+
+IntervalIndexHandle::~IntervalIndexHandle() = default;
+IntervalIndexHandle::IntervalIndexHandle(const IntervalIndexHandle &other) = default;
+IntervalIndexHandle::IntervalIndexHandle(IntervalIndexHandle &&other) noexcept = default;
+IntervalIndexHandle &IntervalIndexHandle::operator=(const IntervalIndexHandle &other) = default;
+IntervalIndexHandle &IntervalIndexHandle::operator=(IntervalIndexHandle &&other) noexcept = default;
+
+bool IntervalIndexHandle::isValid() const noexcept
+{
+    __stdc_impl_t;
+    return validContainerHandle(impl) && impl.indexId != 0;
+}
+
+SchemaId IntervalIndexHandle::schemaId() const noexcept
+{
+    __stdc_impl_t;
+    return impl.schemaId;
+}
+
+ContainerId IntervalIndexHandle::containerId() const noexcept
+{
+    __stdc_impl_t;
+    return impl.containerId;
+}
+
+std::uint32_t IntervalIndexHandle::indexId() const noexcept
+{
+    __stdc_impl_t;
+    return impl.indexId;
+}
+
+const std::string &IntervalIndexHandle::debugName() const noexcept
+{
+    __stdc_impl_t;
+    return debugNameOf(impl);
+}
+
+bool operator==(const IntervalIndexHandle &lhs, const IntervalIndexHandle &rhs)
+{
+    return std::make_tuple(lhs.schemaId(), lhs.containerId(), lhs.indexId(), lhs.debugName()) ==
+           std::make_tuple(rhs.schemaId(), rhs.containerId(), rhs.indexId(), rhs.debugName());
+}
+
 } // namespace dini

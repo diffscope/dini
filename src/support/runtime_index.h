@@ -119,6 +119,86 @@ private:
     std::map<ContainerId, ContainerData> _containers;
 };
 
+class OrderedRuntimeIndex {
+public:
+    void add(const OrderedIndexDefinitionRecord &definition, const ItemSnapshot &snapshot);
+    void remove(const OrderedIndexDefinitionRecord &definition, const ItemSnapshot &snapshot);
+    std::optional<ItemId> previous(const OrderedIndexDefinitionRecord &definition,
+                                   const ItemSnapshot &probe,
+                                   const std::set<ItemId> &excludedIds) const;
+    std::optional<ItemId> next(const OrderedIndexDefinitionRecord &definition,
+                               const ItemSnapshot &probe,
+                               const std::set<ItemId> &excludedIds) const;
+    void ordered(const OrderedIndexDefinitionRecord &definition,
+                 const std::vector<Value> &groupKey,
+                 bool descending,
+                 const std::function<bool(ItemId)> &visitor) const;
+
+public:
+    struct GroupKey {
+        std::vector<ComparableValueKey> values;
+        friend bool operator<(const GroupKey &lhs, const GroupKey &rhs);
+    };
+    struct OrderedEntry {
+        std::vector<ComparableValueKey> orderValues;
+        ItemId id = 0;
+        bool tieBreakById = true;
+        friend bool operator<(const OrderedEntry &lhs, const OrderedEntry &rhs);
+    };
+
+private:
+    std::map<GroupKey, std::set<OrderedEntry>> _groups;
+};
+
+class IntervalRuntimeIndex {
+public:
+    IntervalRuntimeIndex();
+    IntervalRuntimeIndex(const IntervalRuntimeIndex &other);
+    IntervalRuntimeIndex &operator=(const IntervalRuntimeIndex &other);
+    IntervalRuntimeIndex(IntervalRuntimeIndex &&other) noexcept;
+    IntervalRuntimeIndex &operator=(IntervalRuntimeIndex &&other) noexcept;
+    ~IntervalRuntimeIndex();
+
+    void add(const IntervalIndexDefinitionRecord &definition, const ItemSnapshot &snapshot);
+    void remove(const IntervalIndexDefinitionRecord &definition, const ItemSnapshot &snapshot);
+    std::vector<ItemId> overlapping(const IntervalIndexDefinitionRecord &definition,
+                                    const ItemSnapshot &probe,
+                                    const std::set<ItemId> &excludedIds) const;
+    RuntimeItemIdSet query(const IntervalIndexDefinitionRecord &definition,
+                           const std::vector<Value> &groupKey,
+                           const Value &start,
+                           const Value &end) const;
+
+public:
+    struct GroupKey {
+        std::vector<ComparableValueKey> values;
+        friend bool operator<(const GroupKey &lhs, const GroupKey &rhs);
+    };
+    struct IntervalEntry {
+        ComparableValueKey start;
+        ComparableValueKey end;
+        ItemId id = 0;
+        friend bool operator<(const IntervalEntry &lhs, const IntervalEntry &rhs);
+    };
+    struct Node;
+    struct IntervalTree {
+        std::unique_ptr<Node> root;
+        IntervalTree();
+        IntervalTree(const IntervalTree &other);
+        IntervalTree &operator=(const IntervalTree &other);
+        IntervalTree(IntervalTree &&other) noexcept;
+        IntervalTree &operator=(IntervalTree &&other) noexcept;
+        ~IntervalTree();
+        void insert(IntervalEntry entry);
+        void erase(const IntervalEntry &entry);
+        RuntimeItemIdSet query(const Value &start, const Value &end, const std::set<ItemId> &excludedIds) const;
+        bool empty() const noexcept;
+    };
+
+private:
+    std::map<GroupKey, IntervalTree> _groups;
+};
+
 class RuntimeIndexStore {
 public:
     void clear();
@@ -128,9 +208,26 @@ public:
     const RuntimeItemIdSet &containerItems(ContainerId containerId) const;
     RuntimeItemIdSet queryField(const RuntimeIndexedFieldKey &field, ComparisonOperator op, const Value &value) const;
     RuntimeItemIdSet queryRange(ContainerId containerId, const std::vector<RuntimeRangeConstraint> &constraints) const;
+    RuntimeItemIdSet queryInterval(const IntervalIndexDefinitionRecord &definition,
+                                   const std::vector<Value> &groupKey,
+                                   const Value &start,
+                                   const Value &end) const;
     void orderedField(const RuntimeIndexedFieldKey &field,
                       bool descending,
                       const std::function<bool(ItemId)> &visitor) const;
+    void orderedIndex(const OrderedIndexDefinitionRecord &definition,
+                      const std::vector<Value> &groupKey,
+                      bool descending,
+                      const std::function<bool(ItemId)> &visitor) const;
+    std::optional<ItemId> previous(const OrderedIndexDefinitionRecord &definition,
+                                   const ItemSnapshot &probe,
+                                   const std::set<ItemId> &excludedIds) const;
+    std::optional<ItemId> next(const OrderedIndexDefinitionRecord &definition,
+                               const ItemSnapshot &probe,
+                               const std::set<ItemId> &excludedIds) const;
+    std::vector<ItemId> overlapping(const IntervalIndexDefinitionRecord &definition,
+                                    const ItemSnapshot &probe,
+                                    const std::set<ItemId> &excludedIds) const;
     std::size_t countField(const RuntimeIndexedFieldKey &field, ComparisonOperator op, const Value &value) const;
     std::size_t countParent(ContainerId containerId,
                             ColumnId relationColumnId,
@@ -167,6 +264,8 @@ private:
     std::map<ContainerId, RuntimeItemIdSet> _containerItems;
     std::map<RuntimeIndexedFieldKey, ScalarValueIndex> _scalarIndexes;
     ContainerRangeIndex _rangeIndex;
+    std::map<std::pair<ContainerId, std::uint32_t>, OrderedRuntimeIndex> _orderedIndexes;
+    std::map<std::pair<ContainerId, std::uint32_t>, IntervalRuntimeIndex> _intervalIndexes;
     std::map<std::pair<ContainerId, ColumnId>, AggregateColumnData> _aggregateColumns;
     std::map<ContainerId, std::map<ColumnId, std::map<std::string, ParentCountBucket>>> _parentCounts;
 

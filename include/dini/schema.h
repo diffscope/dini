@@ -105,6 +105,20 @@ struct DINI_EXPORT RangeIndexDefinition {
     std::vector<ColumnHandle> columns;
 };
 
+struct DINI_EXPORT OrderedIndexDefinition {
+    std::string debugName;
+    std::vector<ColumnHandle> groupBy;
+    std::vector<ColumnHandle> orderBy;
+    bool tieBreakById = true;
+};
+
+struct DINI_EXPORT IntervalIndexDefinition {
+    std::string debugName;
+    std::vector<ColumnHandle> groupBy;
+    ColumnHandle start;
+    ColumnHandle end;
+};
+
 /**
  * @brief Describes a column that is valid only for one polymorphic variant.
  *
@@ -336,6 +350,10 @@ public:
      * @throws HandleError if validation fails.
      */
     void validate(RelationHandle relation) const;
+
+    void validate(OrderedIndexHandle index) const;
+
+    void validate(IntervalIndexHandle index) const;
 
 private:
     SharedDataPointer<Impl> _impl;
@@ -590,6 +608,10 @@ public:
      */
     void addRangeIndex(const RangeIndexDefinition &definition);
 
+    OrderedIndexHandle addOrderedIndex(const OrderedIndexDefinition &definition);
+
+    IntervalIndexHandle addIntervalIndex(const IntervalIndexDefinition &definition);
+
     /**
      * @brief Registers a hook on this table.
      *
@@ -744,6 +766,10 @@ public:
      * @throws SchemaError if the declaration is invalid or the schema is frozen.
      */
     void addRangeIndex(const RangeIndexDefinition &definition);
+
+    OrderedIndexHandle addOrderedIndex(const OrderedIndexDefinition &definition);
+
+    IntervalIndexHandle addIntervalIndex(const IntervalIndexDefinition &definition);
 
     /**
      * @brief Registers a hook on this list.

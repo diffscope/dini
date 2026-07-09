@@ -112,6 +112,32 @@ namespace dini {
                     hashCombine(hash, column.columnId());
                 }
             }
+            for (const auto &orderedIndex : container.orderedIndexes) {
+                hashString(hash, orderedIndex.debugName);
+                hashCombine(hash, orderedIndex.groupBy.size());
+                for (const auto &column : orderedIndex.groupBy) {
+                    hashCombine(hash, column.containerId());
+                    hashCombine(hash, column.columnId());
+                }
+                hashCombine(hash, orderedIndex.orderBy.size());
+                for (const auto &column : orderedIndex.orderBy) {
+                    hashCombine(hash, column.containerId());
+                    hashCombine(hash, column.columnId());
+                }
+                hashCombine(hash, orderedIndex.tieBreakById ? 1 : 0);
+            }
+            for (const auto &intervalIndex : container.intervalIndexes) {
+                hashString(hash, intervalIndex.debugName);
+                hashCombine(hash, intervalIndex.groupBy.size());
+                for (const auto &column : intervalIndex.groupBy) {
+                    hashCombine(hash, column.containerId());
+                    hashCombine(hash, column.columnId());
+                }
+                hashCombine(hash, intervalIndex.start.containerId());
+                hashCombine(hash, intervalIndex.start.columnId());
+                hashCombine(hash, intervalIndex.end.containerId());
+                hashCombine(hash, intervalIndex.end.columnId());
+            }
             for (const auto &relation : container.relations) {
                 hashCombine(hash, relation.info.id);
                 hashCombine(hash, relation.info.column.columnId());
@@ -592,7 +618,70 @@ namespace dini {
         return column.normalDefinition.participatesInUniqueWhenNull;
     }
 
-    void validateUniqueColumns(const DocumentEngine::Impl &engine, const ItemSnapshot &snapshot)
+    bool variantMatches(const ItemSnapshot &snapshot, std::optional<VariantId> variantId)
+    {
+        return variantId && snapshot.variant && snapshot.variant->variantId() == *variantId;
+    }
+
+    RuntimeItemIdSet intersectItemIdSets(RuntimeItemIdSet lhs, const RuntimeItemIdSet &rhs)
+    {
+        RuntimeItemIdSet result;
+        std::set_intersection(lhs.begin(),
+                              lhs.end(),
+                              rhs.begin(),
+                              rhs.end(),
+                              std::inserter(result, result.end()));
+        return result;
+    }
+
+    RuntimeItemIdSet uniqueColumnCandidates(const DocumentEngine::Impl &engine,
+                                            const ContainerDefinitionRecord &container,
+                                            const ColumnDefinitionRecord &column,
+                                            const ItemSnapshot &snapshot,
+                                            const Value &value)
+    {
+        auto candidates = engine.indexes.queryField(runtimeColumnField(snapshot.containerId, column.info.id),
+                                                    ComparisonOperator::Equal,
+                                                    value);
+        if (!container.relations.empty() && snapshot.parentId) {
+            const auto parentCandidates =
+                engine.indexes.queryField(runtimeColumnField(snapshot.containerId, container.relations.back().info.column.columnId()),
+                                          ComparisonOperator::Equal,
+                                          Value(static_cast<std::uint64_t>(*snapshot.parentId)));
+            candidates = intersectItemIdSets(std::move(candidates), parentCandidates);
+        }
+        if (column.info.variantSpecific && column.variantId) {
+            const auto variantCandidates =
+                engine.indexes.queryField(runtimeVariantField(snapshot.containerId),
+                                          ComparisonOperator::Equal,
+                                          Value(static_cast<std::uint64_t>(*column.variantId)));
+            candidates = intersectItemIdSets(std::move(candidates), variantCandidates);
+        }
+        return candidates;
+    }
+
+    bool uniqueColumnNeedsValidation(const ContainerDefinitionRecord &container,
+                                     const ColumnDefinitionRecord &column,
+                                     const ItemSnapshot &snapshot,
+                                     const ItemSnapshot *previousSnapshot)
+    {
+        if (!previousSnapshot) {
+            return true;
+        }
+        const bool parentScopedUnique = !container.relations.empty();
+        if (parentScopedUnique && previousSnapshot->parentId != snapshot.parentId) {
+            return true;
+        }
+        if (column.info.variantSpecific &&
+            variantMatches(*previousSnapshot, column.variantId) != variantMatches(snapshot, column.variantId)) {
+            return true;
+        }
+        return valueForColumn(*previousSnapshot, column.info.id) != valueForColumn(snapshot, column.info.id);
+    }
+
+    void validateUniqueColumns(const DocumentEngine::Impl &engine,
+                               const ItemSnapshot &snapshot,
+                               const ItemSnapshot *previousSnapshot = nullptr)
     {
         const auto &schemaDefinition = schemaData(engine.schema);
         const auto &container = containerFor(schemaDefinition, snapshot.containerId);
@@ -604,26 +693,34 @@ namespace dini {
             if (column.info.index != IndexKind::Unique) {
                 continue;
             }
+            if (!uniqueColumnNeedsValidation(container, column, snapshot, previousSnapshot)) {
+                continue;
+            }
             const auto value = valueForColumn(snapshot, column.info.id);
             if (!participatesInUnique(column, value)) {
                 continue;
             }
-            for (const auto &[otherId, other] : engine.items) {
-                if (otherId == snapshot.id || other.snapshot.containerId != snapshot.containerId) {
+            const auto candidates = uniqueColumnCandidates(engine, container, column, snapshot, value);
+            for (const auto otherId : candidates) {
+                if (otherId == snapshot.id) {
                     continue;
                 }
+                auto otherIt = engine.items.find(otherId);
+                if (otherIt == engine.items.end() ||
+                    otherIt->second.snapshot.containerId != snapshot.containerId) {
+                    continue;
+                }
+                const auto &otherSnapshot = otherIt->second.snapshot;
                 if (parentScopedUnique) {
-                    if (snapshot.parentId != other.snapshot.parentId) {
+                    if (snapshot.parentId != otherSnapshot.parentId) {
                         continue;
                     }
                 }
                 if (column.info.variantSpecific &&
-                    (!other.snapshot.variant || other.snapshot.variant->variantId() != column.variantId)) {
+                    !variantMatches(otherSnapshot, column.variantId)) {
                     continue;
                 }
-                if (valueForColumn(other.snapshot, column.info.id) == value) {
-                    throw ConstraintError("unique column constraint failed");
-                }
+                throw ConstraintError("unique column constraint failed");
             }
         }
     }
@@ -698,7 +795,9 @@ namespace dini {
         return changes;
     }
 
-    void validateSnapshot(DocumentEngine::Impl &engine, ItemSnapshot &snapshot)
+    void validateSnapshot(DocumentEngine::Impl &engine,
+                          ItemSnapshot &snapshot,
+                          const ItemSnapshot *previousSnapshot = nullptr)
     {
         const auto &schemaDefinition = schemaData(engine.schema);
         const auto &container = containerFor(schemaDefinition, snapshot.containerId);
@@ -746,7 +845,7 @@ namespace dini {
         }
         applyRelationMetadata(schemaDefinition, snapshot);
         validateParentRelations(engine, snapshot);
-        validateUniqueColumns(engine, snapshot);
+        validateUniqueColumns(engine, snapshot, previousSnapshot);
     }
 
     struct PendingBeforeApplyScope {
@@ -961,10 +1060,11 @@ namespace dini {
         }
         validateValueForColumn(columnRecord, value);
 
+        const auto sourceSnapshot = *snapshot;
         auto updatedSnapshot = *snapshot;
         const auto oldValue = valueForColumn(updatedSnapshot, column.columnId());
         setColumnValue(updatedSnapshot, column, value);
-        validateSnapshot(*engine, updatedSnapshot);
+        validateSnapshot(*engine, updatedSnapshot, &sourceSnapshot);
         *snapshot = updatedSnapshot;
 
         if (!transaction.pendingBeforeApplyInsert) {
@@ -1018,7 +1118,7 @@ namespace dini {
             oldValues.push_back(valueForColumn(updatedSnapshot, column.columnId()));
             setColumnValue(updatedSnapshot, column, columnValue.value);
         }
-        validateSnapshot(*engine, updatedSnapshot);
+        validateSnapshot(*engine, updatedSnapshot, &sourceSnapshot);
         if (!transaction.pendingBeforeApplyInsert && !values.empty()) {
             auto operationChange = updateChangeSetForSnapshot(schemaDefinition,
                                                               sourceSnapshot,
@@ -1088,7 +1188,7 @@ namespace dini {
                         }
                     }
                     applyRelationMetadata(schemaDefinition, snapshot);
-                    validateSnapshot(engine, snapshot);
+                    validateSnapshot(engine, snapshot, &oldSnapshot);
                     removeItemFromIndexes(engine, oldSnapshot);
                     removeFromListGroup(engine, oldSnapshot);
                     it->second.snapshot = snapshot;
@@ -1249,6 +1349,30 @@ namespace dini {
         return true;
     }
 
+    bool columnHasSpecialIndexSupport(const ContainerDefinitionRecord &container, ColumnId columnId)
+    {
+        for (const auto &orderedIndex : container.orderedIndexes) {
+            const auto inGroup = std::any_of(orderedIndex.groupBy.begin(), orderedIndex.groupBy.end(), [&](const auto &column) {
+                return column.columnId() == columnId;
+            });
+            const auto inOrder = std::any_of(orderedIndex.orderBy.begin(), orderedIndex.orderBy.end(), [&](const auto &column) {
+                return column.columnId() == columnId;
+            });
+            if (inGroup || inOrder) {
+                return true;
+            }
+        }
+        for (const auto &intervalIndex : container.intervalIndexes) {
+            const auto inGroup = std::any_of(intervalIndex.groupBy.begin(), intervalIndex.groupBy.end(), [&](const auto &column) {
+                return column.columnId() == columnId;
+            });
+            if (inGroup || intervalIndex.start.columnId() == columnId || intervalIndex.end.columnId() == columnId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void validateQueryableField(const EngineSchema &schema, ContainerId containerId, const FieldRef &field)
     {
         const auto &schemaDefinition = schemaData(schema);
@@ -1286,7 +1410,8 @@ namespace dini {
                     throw QueryError("column field does not belong to queried container");
                 }
                 const auto &record = columnFor(schemaDefinition, column);
-                if (record.info.index == IndexKind::None) {
+                const auto &container = containerFor(schemaDefinition, containerId);
+                if (record.info.index == IndexKind::None && !columnHasSpecialIndexSupport(container, column.columnId())) {
                     throw QueryError("column field is not indexed");
                 }
                 return;
@@ -1627,10 +1752,182 @@ namespace dini {
         return false;
     }
 
+    std::optional<ColumnId> columnIdForField(ContainerId containerId, const FieldRef &field)
+    {
+        if (field.kind() == FieldKind::Column) {
+            const auto column = field.column();
+            return column.containerId() == containerId ? std::optional<ColumnId>(column.columnId()) : std::nullopt;
+        }
+        if (field.kind() == FieldKind::Parent) {
+            const auto column = field.relation().column();
+            return column.containerId() == containerId ? std::optional<ColumnId>(column.columnId()) : std::nullopt;
+        }
+        return std::nullopt;
+    }
+
+    bool collectEqualityFilters(ContainerId containerId,
+                                const FilterExpression &expression,
+                                std::map<ColumnId, Value> &equalities)
+    {
+        const auto &impl = filterExpressionImpl(expression);
+        if (impl.empty) {
+            return true;
+        }
+        if (impl.filter) {
+            if (impl.filter->comparisonOperator() != ComparisonOperator::Equal) {
+                return true;
+            }
+            const auto columnId = columnIdForField(containerId, impl.filter->field());
+            if (!columnId) {
+                return true;
+            }
+            auto [it, inserted] = equalities.emplace(*columnId, impl.filter->value());
+            return inserted || compareValues(it->second, impl.filter->value()) == 0;
+        }
+        if (impl.op != FilterOperator::And) {
+            return true;
+        }
+        for (const auto &child : impl.children) {
+            if (!collectEqualityFilters(containerId, child, equalities)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::optional<std::vector<Value>> groupKeyFromEqualities(const std::vector<ColumnHandle> &groupBy,
+                                                             const std::map<ColumnId, Value> &equalities)
+    {
+        std::vector<Value> values;
+        values.reserve(groupBy.size());
+        for (const auto &column : groupBy) {
+            auto it = equalities.find(column.columnId());
+            if (it == equalities.end() || it->second.isNull()) {
+                return std::nullopt;
+            }
+            values.push_back(it->second);
+        }
+        return values;
+    }
+
+    bool sortMatchesOrderedIndex(ContainerId containerId,
+                                 const std::vector<SortKey> &sortKeys,
+                                 const OrderedIndexDefinitionRecord &index,
+                                 bool &descending)
+    {
+        if (sortKeys.empty() || sortKeys.size() != index.orderBy.size()) {
+            return false;
+        }
+        descending = sortKeys.front().direction == SortDirection::Descending;
+        for (std::size_t i = 0; i < sortKeys.size(); ++i) {
+            if ((sortKeys[i].direction == SortDirection::Descending) != descending) {
+                return false;
+            }
+            const auto columnId = columnIdForField(containerId, sortKeys[i].field);
+            if (!columnId || *columnId != index.orderBy[i].columnId()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    struct OrderedQueryPlan {
+        const OrderedIndexDefinitionRecord *index = nullptr;
+        std::vector<Value> groupKey;
+        bool descending = false;
+    };
+
+    std::optional<OrderedQueryPlan> orderedQueryPlanFor(const SchemaDefinitionData &schemaDefinition,
+                                                        ContainerId containerId,
+                                                        const QuerySpec &spec)
+    {
+        const auto *container = findContainer(schemaDefinition, containerId);
+        if (!container || spec.sortKeys.empty()) {
+            return std::nullopt;
+        }
+        std::map<ColumnId, Value> equalities;
+        if (!collectEqualityFilters(containerId, spec.filter, equalities)) {
+            return std::nullopt;
+        }
+        for (const auto &index : container->orderedIndexes) {
+            bool descending = false;
+            if (!sortMatchesOrderedIndex(containerId, spec.sortKeys, index, descending)) {
+                continue;
+            }
+            auto groupKey = groupKeyFromEqualities(index.groupBy, equalities);
+            if (!groupKey) {
+                continue;
+            }
+            return OrderedQueryPlan {
+                .index = &index,
+                .groupKey = std::move(*groupKey),
+                .descending = descending,
+            };
+        }
+        return std::nullopt;
+    }
+
+    std::optional<RuntimeItemIdSet> intervalCandidatesForExpression(const DocumentEngine::Impl &engine,
+                                                                    ContainerId containerId,
+                                                                    const FilterExpression &expression)
+    {
+        const auto *container = findContainer(schemaData(engine.schema), containerId);
+        if (!container || container->intervalIndexes.empty()) {
+            return std::nullopt;
+        }
+        const auto &impl = filterExpressionImpl(expression);
+        if (impl.empty || impl.op != FilterOperator::And) {
+            return std::nullopt;
+        }
+
+        std::map<ColumnId, Value> equalities;
+        if (!collectEqualityFilters(containerId, expression, equalities)) {
+            return std::nullopt;
+        }
+
+        for (const auto &index : container->intervalIndexes) {
+            auto groupKey = groupKeyFromEqualities(index.groupBy, equalities);
+            if (!groupKey) {
+                continue;
+            }
+
+            std::optional<Value> probeStart;
+            std::optional<Value> probeEnd;
+            for (const auto &child : impl.children) {
+                const auto &childImpl = filterExpressionImpl(child);
+                if (!childImpl.filter) {
+                    continue;
+                }
+                const auto columnId = columnIdForField(containerId, childImpl.filter->field());
+                if (!columnId) {
+                    continue;
+                }
+                if (*columnId == index.start.columnId() &&
+                    childImpl.filter->comparisonOperator() == ComparisonOperator::Less) {
+                    probeEnd = childImpl.filter->value();
+                } else if (*columnId == index.end.columnId() &&
+                           childImpl.filter->comparisonOperator() == ComparisonOperator::Greater) {
+                    probeStart = childImpl.filter->value();
+                }
+            }
+            if (probeStart && probeEnd) {
+                return engine.indexes.queryInterval(index, *groupKey, *probeStart, *probeEnd);
+            }
+        }
+        return std::nullopt;
+    }
+
     std::optional<std::set<ItemId>> indexedCandidatesForFilter(const DocumentEngine::Impl &engine,
                                                                ContainerId containerId,
                                                                const Filter &filter)
     {
+        if (filter.field().kind() == FieldKind::Column) {
+            const auto column = filter.field().column();
+            if (column.containerId() != containerId ||
+                !columnIsIndexed(columnFor(schemaData(engine.schema), column))) {
+                return std::nullopt;
+            }
+        }
         const auto field = indexedFieldKeyForFilter(containerId, filter);
         if (!field) {
             return std::nullopt;
@@ -1667,6 +1964,9 @@ namespace dini {
             return result;
         }
         if (impl.op == FilterOperator::And) {
+            if (auto intervalCandidates = intervalCandidatesForExpression(engine, containerId, expression)) {
+                return intervalCandidates;
+            }
             std::vector<RuntimeRangeConstraint> constraints;
             if (collectPureAndRangeConstraints(engine.schema, containerId, expression, constraints) &&
                 constraints.size() > 1 &&
@@ -1706,6 +2006,25 @@ namespace dini {
         return accumulated;
     }
 
+    void sortQueryItems(const SchemaDefinitionData &schemaDefinition,
+                        std::vector<ItemSnapshot> &items,
+                        const std::vector<SortKey> &sortKeys,
+                        std::size_t firstKey = 0)
+    {
+        if (firstKey >= sortKeys.size()) {
+            return;
+        }
+        for (std::size_t index = sortKeys.size(); index > firstKey;) {
+            --index;
+            const auto &sortKey = sortKeys[index];
+            std::stable_sort(items.begin(), items.end(), [&](const auto &lhs, const auto &rhs) {
+                const auto comparison = compareValues(fieldValue(schemaDefinition, lhs, sortKey.field),
+                                                      fieldValue(schemaDefinition, rhs, sortKey.field));
+                return sortKey.direction == SortDirection::Ascending ? comparison < 0 : comparison > 0;
+            });
+        }
+    }
+
     void applyQuerySpec(const SchemaDefinitionData &schemaDefinition, std::vector<ItemSnapshot> &items, const QuerySpec &spec)
     {
         items.erase(std::remove_if(items.begin(),
@@ -1714,13 +2033,7 @@ namespace dini {
                                        return !matchesExpression(schemaDefinition, item, spec.filter);
                                    }),
                     items.end());
-        for (auto sortIt = spec.sortKeys.rbegin(); sortIt != spec.sortKeys.rend(); ++sortIt) {
-            std::stable_sort(items.begin(), items.end(), [&](const auto &lhs, const auto &rhs) {
-                const auto comparison = compareValues(fieldValue(schemaDefinition, lhs, sortIt->field),
-                                                      fieldValue(schemaDefinition, rhs, sortIt->field));
-                return sortIt->direction == SortDirection::Ascending ? comparison < 0 : comparison > 0;
-            });
-        }
+        sortQueryItems(schemaDefinition, items, spec.sortKeys);
     }
 
     void executeQueryResults(const DocumentEngine::Impl &engine,
@@ -1758,6 +2071,75 @@ namespace dini {
             }
             return emit(itemIt->second.snapshot);
         };
+
+        if (!useListDefaultOrder) {
+            if (auto orderedPlan = orderedQueryPlanFor(schemaData(engine.schema), containerId, spec)) {
+                bool keepGoing = true;
+                engine.indexes.orderedIndex(*orderedPlan->index, orderedPlan->groupKey, orderedPlan->descending, [&](ItemId id) {
+                    if (candidates && candidates->find(id) == candidates->end()) {
+                        return true;
+                    }
+                    keepGoing = emitId(id);
+                    return keepGoing;
+                });
+                return;
+            }
+        }
+
+        if (!useListDefaultOrder && spec.sortKeys.size() > 1 &&
+            fieldAlwaysApplies(schemaData(engine.schema), containerId, spec.sortKeys.front().field)) {
+            if (const auto sortField = indexedFieldKeyForSort(containerId, spec.sortKeys.front().field)) {
+                const auto descending = spec.sortKeys.front().direction == SortDirection::Descending;
+                std::vector<ItemSnapshot> bucket;
+                std::optional<Value> bucketValue;
+
+                auto flushBucket = [&]() {
+                    if (bucket.empty()) {
+                        return true;
+                    }
+                    sortQueryItems(schemaData(engine.schema), bucket, spec.sortKeys, 1);
+                    for (const auto &item : bucket) {
+                        if (!emit(item)) {
+                            bucket.clear();
+                            bucketValue.reset();
+                            return false;
+                        }
+                    }
+                    bucket.clear();
+                    bucketValue.reset();
+                    return true;
+                };
+
+                bool keepGoing = true;
+                engine.indexes.orderedField(*sortField, descending, [&](ItemId id) {
+                    if (candidates && candidates->find(id) == candidates->end()) {
+                        return true;
+                    }
+                    auto itemIt = engine.items.find(id);
+                    if (itemIt == engine.items.end() || itemIt->second.snapshot.containerId != containerId) {
+                        return true;
+                    }
+                    const auto &snapshot = itemIt->second.snapshot;
+                    if (!matchesExpression(schemaData(engine.schema), snapshot, spec.filter)) {
+                        return true;
+                    }
+                    const auto value = fieldValue(schemaData(engine.schema), snapshot, spec.sortKeys.front().field);
+                    if (bucketValue && compareValues(*bucketValue, value) != 0) {
+                        keepGoing = flushBucket();
+                        if (!keepGoing) {
+                            return false;
+                        }
+                    }
+                    bucketValue = value;
+                    bucket.push_back(snapshot);
+                    return true;
+                });
+                if (keepGoing) {
+                    flushBucket();
+                }
+                return;
+            }
+        }
 
         const bool canStreamInIndexOrder = !useListDefaultOrder &&
             (spec.sortKeys.empty() || spec.sortKeys.size() == 1);
@@ -1956,6 +2338,68 @@ Value DocumentEngine::read(ItemId itemId, ColumnHandle column) const
         throw QueryError("variant-specific column is not valid for this item");
     }
     return valueForColumn(snapshot, column.columnId());
+}
+
+std::optional<ItemSnapshot> DocumentEngine::previous(OrderedIndexHandle index,
+                                                     const ItemSnapshot &probe,
+                                                     const std::set<ItemId> &excludedIds) const
+{
+    _impl->schema.validate(index);
+    if (probe.containerId != index.containerId()) {
+        throw QueryError("ordered index probe belongs to another container");
+    }
+    const auto *definition = findOrderedIndex(schemaData(_impl->schema), index.containerId(), index.indexId());
+    if (!definition) {
+        throw HandleError("invalid ordered index handle");
+    }
+    auto id = _impl->indexes.previous(*definition, probe, excludedIds);
+    if (!id) {
+        return {};
+    }
+    auto it = _impl->items.find(*id);
+    return it == _impl->items.end() ? std::optional<ItemSnapshot> {} : std::optional<ItemSnapshot>(it->second.snapshot);
+}
+
+std::optional<ItemSnapshot> DocumentEngine::next(OrderedIndexHandle index,
+                                                 const ItemSnapshot &probe,
+                                                 const std::set<ItemId> &excludedIds) const
+{
+    _impl->schema.validate(index);
+    if (probe.containerId != index.containerId()) {
+        throw QueryError("ordered index probe belongs to another container");
+    }
+    const auto *definition = findOrderedIndex(schemaData(_impl->schema), index.containerId(), index.indexId());
+    if (!definition) {
+        throw HandleError("invalid ordered index handle");
+    }
+    auto id = _impl->indexes.next(*definition, probe, excludedIds);
+    if (!id) {
+        return {};
+    }
+    auto it = _impl->items.find(*id);
+    return it == _impl->items.end() ? std::optional<ItemSnapshot> {} : std::optional<ItemSnapshot>(it->second.snapshot);
+}
+
+std::vector<ItemSnapshot> DocumentEngine::overlapping(IntervalIndexHandle index,
+                                                      const ItemSnapshot &probe,
+                                                      const std::set<ItemId> &excludedIds) const
+{
+    _impl->schema.validate(index);
+    if (probe.containerId != index.containerId()) {
+        throw QueryError("interval index probe belongs to another container");
+    }
+    const auto *definition = findIntervalIndex(schemaData(_impl->schema), index.containerId(), index.indexId());
+    if (!definition) {
+        throw HandleError("invalid interval index handle");
+    }
+    std::vector<ItemSnapshot> result;
+    for (const auto id : _impl->indexes.overlapping(*definition, probe, excludedIds)) {
+        auto it = _impl->items.find(id);
+        if (it != _impl->items.end()) {
+            result.push_back(it->second.snapshot);
+        }
+    }
+    return result;
 }
 
 bool DocumentEngine::contains(ItemId itemId) const
@@ -2754,7 +3198,7 @@ void Transaction::update(ItemId itemId, ColumnHandle column, Value value, Associ
             }
         }
         applyRelationMetadata(schemaDefinition, snapshot);
-        validateSnapshot(engine, snapshot);
+        validateSnapshot(engine, snapshot, &oldSnapshot);
         auto operationChange = updateChangeSetForSnapshot(schemaDefinition,
                                                           oldSnapshot,
                                                           itemId,
@@ -2863,7 +3307,7 @@ void Transaction::update(ItemId itemId, std::vector<ColumnValue> values)
         }
 
         applyRelationMetadata(schemaDefinition, snapshot);
-        validateSnapshot(engine, snapshot);
+        validateSnapshot(engine, snapshot, &oldSnapshot);
         auto operationChange = updateChangeSetForSnapshot(schemaDefinition,
                                                           oldSnapshot,
                                                           itemId,

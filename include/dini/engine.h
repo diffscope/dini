@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include <dini/change.h>
@@ -122,6 +123,18 @@ public:
      * @throws HandleError if column belongs to another schema; throws QueryError for invalid reads.
      */
     Value read(ItemId itemId, ColumnHandle column) const;
+
+    std::optional<ItemSnapshot> previous(OrderedIndexHandle index,
+                                         const ItemSnapshot &probe,
+                                         const std::set<ItemId> &excludedIds = {}) const;
+
+    std::optional<ItemSnapshot> next(OrderedIndexHandle index,
+                                     const ItemSnapshot &probe,
+                                     const std::set<ItemId> &excludedIds = {}) const;
+
+    std::vector<ItemSnapshot> overlapping(IntervalIndexHandle index,
+                                          const ItemSnapshot &probe,
+                                          const std::set<ItemId> &excludedIds = {}) const;
 
     /**
      * @brief Tests whether an item currently exists.

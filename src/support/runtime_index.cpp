@@ -652,11 +652,473 @@ RuntimeItemIdSet ContainerRangeIndex::query(ContainerId containerId,
     return result;
 }
 
+namespace {
+
+std::vector<ComparableValueKey> keyValuesForColumns(const ItemSnapshot &snapshot,
+                                                    const std::vector<ColumnHandle> &columns)
+{
+    std::vector<ComparableValueKey> values;
+    values.reserve(columns.size());
+    for (const auto &column : columns) {
+        const auto value = valueForColumn(snapshot, column.columnId());
+        if (value.isNull()) {
+            return {};
+        }
+        values.push_back(ComparableValueKey(value));
+    }
+    return values;
+}
+
+std::vector<ComparableValueKey> keyValuesFromValues(const std::vector<Value> &values)
+{
+    std::vector<ComparableValueKey> result;
+    result.reserve(values.size());
+    for (const auto &value : values) {
+        if (value.isNull()) {
+            return {};
+        }
+        result.push_back(ComparableValueKey(value));
+    }
+    return result;
+}
+
+std::uint32_t priorityForInterval(ItemId id, const Value &start, const Value &end)
+{
+    std::uint64_t hash = id ^ 0x9e3779b97f4a7c15ULL;
+    auto mix = [&](std::uint64_t value) {
+        hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U);
+    };
+    const std::hash<std::string> hashString;
+    mix(static_cast<std::uint64_t>(hashString(stableValueKey(start))));
+    mix(static_cast<std::uint64_t>(hashString(stableValueKey(end))));
+    hash ^= hash >> 33U;
+    hash *= 0xff51afd7ed558ccdULL;
+    hash ^= hash >> 33U;
+    return static_cast<std::uint32_t>(hash);
+}
+
+} // namespace
+
+bool operator<(const OrderedRuntimeIndex::GroupKey &lhs, const OrderedRuntimeIndex::GroupKey &rhs)
+{
+    return std::lexicographical_compare(lhs.values.begin(), lhs.values.end(), rhs.values.begin(), rhs.values.end());
+}
+
+bool operator<(const OrderedRuntimeIndex::OrderedEntry &lhs, const OrderedRuntimeIndex::OrderedEntry &rhs)
+{
+    if (std::lexicographical_compare(lhs.orderValues.begin(), lhs.orderValues.end(), rhs.orderValues.begin(), rhs.orderValues.end())) {
+        return true;
+    }
+    if (std::lexicographical_compare(rhs.orderValues.begin(), rhs.orderValues.end(), lhs.orderValues.begin(), lhs.orderValues.end())) {
+        return false;
+    }
+    return lhs.id < rhs.id;
+}
+
+void OrderedRuntimeIndex::add(const OrderedIndexDefinitionRecord &definition, const ItemSnapshot &snapshot)
+{
+    auto groupValues = keyValuesForColumns(snapshot, definition.groupBy);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return;
+    }
+    auto orderValues = keyValuesForColumns(snapshot, definition.orderBy);
+    if (orderValues.size() != definition.orderBy.size()) {
+        return;
+    }
+    _groups[GroupKey {std::move(groupValues)}].insert(OrderedEntry {
+        .orderValues = std::move(orderValues),
+        .id = snapshot.id,
+        .tieBreakById = definition.tieBreakById,
+    });
+}
+
+void OrderedRuntimeIndex::remove(const OrderedIndexDefinitionRecord &definition, const ItemSnapshot &snapshot)
+{
+    auto groupValues = keyValuesForColumns(snapshot, definition.groupBy);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return;
+    }
+    auto orderValues = keyValuesForColumns(snapshot, definition.orderBy);
+    if (orderValues.size() != definition.orderBy.size()) {
+        return;
+    }
+    auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    if (groupIt == _groups.end()) {
+        return;
+    }
+    groupIt->second.erase(OrderedEntry {
+        .orderValues = std::move(orderValues),
+        .id = snapshot.id,
+        .tieBreakById = definition.tieBreakById,
+    });
+    if (groupIt->second.empty()) {
+        _groups.erase(groupIt);
+    }
+}
+
+std::optional<ItemId> OrderedRuntimeIndex::previous(const OrderedIndexDefinitionRecord &definition,
+                                                    const ItemSnapshot &probe,
+                                                    const std::set<ItemId> &excludedIds) const
+{
+    auto groupValues = keyValuesForColumns(probe, definition.groupBy);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return {};
+    }
+    auto orderValues = keyValuesForColumns(probe, definition.orderBy);
+    if (orderValues.size() != definition.orderBy.size()) {
+        return {};
+    }
+    auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    if (groupIt == _groups.end()) {
+        return {};
+    }
+    const auto probeEntry = OrderedEntry {
+        .orderValues = std::move(orderValues),
+        .id = probe.id,
+        .tieBreakById = definition.tieBreakById,
+    };
+    auto it = groupIt->second.lower_bound(probeEntry);
+    while (it != groupIt->second.begin()) {
+        --it;
+        if (excludedIds.find(it->id) == excludedIds.end()) {
+            return it->id;
+        }
+    }
+    return {};
+}
+
+std::optional<ItemId> OrderedRuntimeIndex::next(const OrderedIndexDefinitionRecord &definition,
+                                                const ItemSnapshot &probe,
+                                                const std::set<ItemId> &excludedIds) const
+{
+    auto groupValues = keyValuesForColumns(probe, definition.groupBy);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return {};
+    }
+    auto orderValues = keyValuesForColumns(probe, definition.orderBy);
+    if (orderValues.size() != definition.orderBy.size()) {
+        return {};
+    }
+    auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    if (groupIt == _groups.end()) {
+        return {};
+    }
+    const auto probeEntry = OrderedEntry {
+        .orderValues = std::move(orderValues),
+        .id = probe.id,
+        .tieBreakById = definition.tieBreakById,
+    };
+    for (auto it = groupIt->second.upper_bound(probeEntry); it != groupIt->second.end(); ++it) {
+        if (excludedIds.find(it->id) == excludedIds.end()) {
+            return it->id;
+        }
+    }
+    return {};
+}
+
+void OrderedRuntimeIndex::ordered(const OrderedIndexDefinitionRecord &definition,
+                                  const std::vector<Value> &groupKey,
+                                  bool descending,
+                                  const std::function<bool(ItemId)> &visitor) const
+{
+    auto groupValues = keyValuesFromValues(groupKey);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return;
+    }
+    auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    if (groupIt == _groups.end()) {
+        return;
+    }
+    if (descending) {
+        for (auto it = groupIt->second.rbegin(); it != groupIt->second.rend(); ++it) {
+            if (!visitor(it->id)) {
+                return;
+            }
+        }
+        return;
+    }
+    for (const auto &entry : groupIt->second) {
+        if (!visitor(entry.id)) {
+            return;
+        }
+    }
+}
+
+bool operator<(const IntervalRuntimeIndex::GroupKey &lhs, const IntervalRuntimeIndex::GroupKey &rhs)
+{
+    return std::lexicographical_compare(lhs.values.begin(), lhs.values.end(), rhs.values.begin(), rhs.values.end());
+}
+
+bool operator<(const IntervalRuntimeIndex::IntervalEntry &lhs, const IntervalRuntimeIndex::IntervalEntry &rhs)
+{
+    return std::tie(lhs.start, lhs.end, lhs.id) < std::tie(rhs.start, rhs.end, rhs.id);
+}
+
+struct IntervalRuntimeIndex::Node {
+    IntervalEntry entry;
+    Value subtreeMaxEnd;
+    std::uint32_t priority = 0;
+    std::unique_ptr<Node> left;
+    std::unique_ptr<Node> right;
+
+    explicit Node(IntervalEntry entry)
+        : entry(std::move(entry)),
+          subtreeMaxEnd(this->entry.end.value),
+          priority(priorityForInterval(this->entry.id, this->entry.start.value, this->entry.end.value))
+    {
+    }
+};
+
+namespace {
+
+std::unique_ptr<IntervalRuntimeIndex::Node> cloneIntervalNode(const IntervalRuntimeIndex::Node *node)
+{
+    if (!node) {
+        return {};
+    }
+    auto copy = std::make_unique<IntervalRuntimeIndex::Node>(node->entry);
+    copy->subtreeMaxEnd = node->subtreeMaxEnd;
+    copy->priority = node->priority;
+    copy->left = cloneIntervalNode(node->left.get());
+    copy->right = cloneIntervalNode(node->right.get());
+    return copy;
+}
+
+bool valueLess(const Value &lhs, const Value &rhs)
+{
+    return ComparableValueKey(lhs) < ComparableValueKey(rhs);
+}
+
+void updateIntervalNode(IntervalRuntimeIndex::Node *node)
+{
+    if (!node) {
+        return;
+    }
+    node->subtreeMaxEnd = node->entry.end.value;
+    if (node->left && valueLess(node->subtreeMaxEnd, node->left->subtreeMaxEnd)) {
+        node->subtreeMaxEnd = node->left->subtreeMaxEnd;
+    }
+    if (node->right && valueLess(node->subtreeMaxEnd, node->right->subtreeMaxEnd)) {
+        node->subtreeMaxEnd = node->right->subtreeMaxEnd;
+    }
+}
+
+void rotateIntervalRight(std::unique_ptr<IntervalRuntimeIndex::Node> &node)
+{
+    auto left = std::move(node->left);
+    node->left = std::move(left->right);
+    updateIntervalNode(node.get());
+    left->right = std::move(node);
+    updateIntervalNode(left->right.get());
+    updateIntervalNode(left.get());
+    node = std::move(left);
+}
+
+void rotateIntervalLeft(std::unique_ptr<IntervalRuntimeIndex::Node> &node)
+{
+    auto right = std::move(node->right);
+    node->right = std::move(right->left);
+    updateIntervalNode(node.get());
+    right->left = std::move(node);
+    updateIntervalNode(right->left.get());
+    updateIntervalNode(right.get());
+    node = std::move(right);
+}
+
+void insertIntervalNode(std::unique_ptr<IntervalRuntimeIndex::Node> &node, IntervalRuntimeIndex::IntervalEntry entry)
+{
+    if (!node) {
+        node = std::make_unique<IntervalRuntimeIndex::Node>(std::move(entry));
+        return;
+    }
+    if (entry < node->entry) {
+        insertIntervalNode(node->left, std::move(entry));
+        if (node->left && node->left->priority < node->priority) {
+            rotateIntervalRight(node);
+        }
+    } else if (node->entry < entry) {
+        insertIntervalNode(node->right, std::move(entry));
+        if (node->right && node->right->priority < node->priority) {
+            rotateIntervalLeft(node);
+        }
+    } else {
+        return;
+    }
+    updateIntervalNode(node.get());
+}
+
+void eraseIntervalNode(std::unique_ptr<IntervalRuntimeIndex::Node> &node, const IntervalRuntimeIndex::IntervalEntry &entry)
+{
+    if (!node) {
+        return;
+    }
+    if (entry < node->entry) {
+        eraseIntervalNode(node->left, entry);
+    } else if (node->entry < entry) {
+        eraseIntervalNode(node->right, entry);
+    } else if (!node->left) {
+        node = std::move(node->right);
+    } else if (!node->right) {
+        node = std::move(node->left);
+    } else if (node->left->priority < node->right->priority) {
+        rotateIntervalRight(node);
+        eraseIntervalNode(node->right, entry);
+    } else {
+        rotateIntervalLeft(node);
+        eraseIntervalNode(node->left, entry);
+    }
+    updateIntervalNode(node.get());
+}
+
+void queryIntervalNode(const IntervalRuntimeIndex::Node *node,
+                       const Value &probeStart,
+                       const Value &probeEnd,
+                       const std::set<ItemId> &excludedIds,
+                       RuntimeItemIdSet &result)
+{
+    if (!node || !valueLess(probeStart, node->subtreeMaxEnd)) {
+        return;
+    }
+    queryIntervalNode(node->left.get(), probeStart, probeEnd, excludedIds, result);
+    if (valueLess(node->entry.start.value, probeEnd)) {
+        if (valueLess(probeStart, node->entry.end.value) && excludedIds.find(node->entry.id) == excludedIds.end()) {
+            result.insert(node->entry.id);
+        }
+        queryIntervalNode(node->right.get(), probeStart, probeEnd, excludedIds, result);
+    }
+}
+
+IntervalRuntimeIndex::IntervalEntry intervalEntryFor(const IntervalIndexDefinitionRecord &definition,
+                                                     const ItemSnapshot &snapshot)
+{
+    return IntervalRuntimeIndex::IntervalEntry {
+        .start = ComparableValueKey(valueForColumn(snapshot, definition.start.columnId())),
+        .end = ComparableValueKey(valueForColumn(snapshot, definition.end.columnId())),
+        .id = snapshot.id,
+    };
+}
+
+} // namespace
+
+IntervalRuntimeIndex::IntervalRuntimeIndex() = default;
+IntervalRuntimeIndex::IntervalRuntimeIndex(const IntervalRuntimeIndex &other) = default;
+IntervalRuntimeIndex &IntervalRuntimeIndex::operator=(const IntervalRuntimeIndex &other) = default;
+IntervalRuntimeIndex::IntervalRuntimeIndex(IntervalRuntimeIndex &&other) noexcept = default;
+IntervalRuntimeIndex &IntervalRuntimeIndex::operator=(IntervalRuntimeIndex &&other) noexcept = default;
+IntervalRuntimeIndex::~IntervalRuntimeIndex() = default;
+
+IntervalRuntimeIndex::IntervalTree::IntervalTree() = default;
+IntervalRuntimeIndex::IntervalTree::IntervalTree(const IntervalTree &other) : root(cloneIntervalNode(other.root.get())) {}
+IntervalRuntimeIndex::IntervalTree &IntervalRuntimeIndex::IntervalTree::operator=(const IntervalTree &other)
+{
+    if (this != &other) {
+        root = cloneIntervalNode(other.root.get());
+    }
+    return *this;
+}
+IntervalRuntimeIndex::IntervalTree::IntervalTree(IntervalTree &&other) noexcept = default;
+IntervalRuntimeIndex::IntervalTree &IntervalRuntimeIndex::IntervalTree::operator=(IntervalTree &&other) noexcept = default;
+IntervalRuntimeIndex::IntervalTree::~IntervalTree() = default;
+
+void IntervalRuntimeIndex::IntervalTree::insert(IntervalEntry entry)
+{
+    insertIntervalNode(root, std::move(entry));
+}
+
+void IntervalRuntimeIndex::IntervalTree::erase(const IntervalEntry &entry)
+{
+    eraseIntervalNode(root, entry);
+}
+
+RuntimeItemIdSet IntervalRuntimeIndex::IntervalTree::query(const Value &start,
+                                                           const Value &end,
+                                                           const std::set<ItemId> &excludedIds) const
+{
+    RuntimeItemIdSet result;
+    if (!valueLess(start, end)) {
+        return result;
+    }
+    queryIntervalNode(root.get(), start, end, excludedIds, result);
+    return result;
+}
+
+bool IntervalRuntimeIndex::IntervalTree::empty() const noexcept
+{
+    return !root;
+}
+
+void IntervalRuntimeIndex::add(const IntervalIndexDefinitionRecord &definition, const ItemSnapshot &snapshot)
+{
+    auto groupValues = keyValuesForColumns(snapshot, definition.groupBy);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return;
+    }
+    auto entry = intervalEntryFor(definition, snapshot);
+    if (entry.start.value.isNull() || entry.end.value.isNull() || !valueLess(entry.start.value, entry.end.value)) {
+        return;
+    }
+    _groups[GroupKey {std::move(groupValues)}].insert(std::move(entry));
+}
+
+void IntervalRuntimeIndex::remove(const IntervalIndexDefinitionRecord &definition, const ItemSnapshot &snapshot)
+{
+    auto groupValues = keyValuesForColumns(snapshot, definition.groupBy);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return;
+    }
+    auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    if (groupIt == _groups.end()) {
+        return;
+    }
+    groupIt->second.erase(intervalEntryFor(definition, snapshot));
+    if (groupIt->second.empty()) {
+        _groups.erase(groupIt);
+    }
+}
+
+std::vector<ItemId> IntervalRuntimeIndex::overlapping(const IntervalIndexDefinitionRecord &definition,
+                                                      const ItemSnapshot &probe,
+                                                      const std::set<ItemId> &excludedIds) const
+{
+    auto groupValues = keyValuesForColumns(probe, definition.groupBy);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return {};
+    }
+    auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    if (groupIt == _groups.end()) {
+        return {};
+    }
+    auto excluded = excludedIds;
+    excluded.insert(probe.id);
+    auto ids = groupIt->second.query(valueForColumn(probe, definition.start.columnId()),
+                                     valueForColumn(probe, definition.end.columnId()),
+                                     excluded);
+    return std::vector<ItemId>(ids.begin(), ids.end());
+}
+
+RuntimeItemIdSet IntervalRuntimeIndex::query(const IntervalIndexDefinitionRecord &definition,
+                                             const std::vector<Value> &groupKey,
+                                             const Value &start,
+                                             const Value &end) const
+{
+    auto groupValues = keyValuesFromValues(groupKey);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return {};
+    }
+    auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    if (groupIt == _groups.end()) {
+        return {};
+    }
+    return groupIt->second.query(start, end, {});
+}
+
 void RuntimeIndexStore::clear()
 {
     _containerItems.clear();
     _scalarIndexes.clear();
     _rangeIndex.clear();
+    _orderedIndexes.clear();
+    _intervalIndexes.clear();
     _aggregateColumns.clear();
     _parentCounts.clear();
 }
@@ -682,6 +1144,12 @@ void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, co
         for (const auto &column : rangeIndex.columns) {
             rangeColumnIds.insert(column.columnId());
         }
+    }
+    for (const auto &orderedIndex : container->orderedIndexes) {
+        _orderedIndexes[{snapshot.containerId, orderedIndex.handle.indexId()}].add(orderedIndex, snapshot);
+    }
+    for (const auto &intervalIndex : container->intervalIndexes) {
+        _intervalIndexes[{snapshot.containerId, intervalIndex.handle.indexId()}].add(intervalIndex, snapshot);
     }
     for (const auto &relation : container->relations) {
         const auto groupValue = valueForColumn(snapshot, relation.info.column.columnId());
@@ -747,6 +1215,18 @@ void RuntimeIndexStore::removeItem(const SchemaDefinitionData &schemaDefinition,
 
     const auto *container = findContainer(schemaDefinition, snapshot.containerId);
     if (container) {
+        for (const auto &orderedIndex : container->orderedIndexes) {
+            auto indexIt = _orderedIndexes.find({snapshot.containerId, orderedIndex.handle.indexId()});
+            if (indexIt != _orderedIndexes.end()) {
+                indexIt->second.remove(orderedIndex, snapshot);
+            }
+        }
+        for (const auto &intervalIndex : container->intervalIndexes) {
+            auto indexIt = _intervalIndexes.find({snapshot.containerId, intervalIndex.handle.indexId()});
+            if (indexIt != _intervalIndexes.end()) {
+                indexIt->second.remove(intervalIndex, snapshot);
+            }
+        }
         for (const auto &relation : container->relations) {
             const auto groupValue = valueForColumn(snapshot, relation.info.column.columnId());
             auto relationIt = _parentCounts.find(snapshot.containerId);
@@ -838,6 +1318,18 @@ RuntimeItemIdSet RuntimeIndexStore::queryRange(ContainerId containerId,
     return _rangeIndex.query(containerId, constraints);
 }
 
+RuntimeItemIdSet RuntimeIndexStore::queryInterval(const IntervalIndexDefinitionRecord &definition,
+                                                  const std::vector<Value> &groupKey,
+                                                  const Value &start,
+                                                  const Value &end) const
+{
+    auto it = _intervalIndexes.find({definition.handle.containerId(), definition.handle.indexId()});
+    if (it == _intervalIndexes.end()) {
+        return {};
+    }
+    return it->second.query(definition, groupKey, start, end);
+}
+
 void RuntimeIndexStore::orderedField(const RuntimeIndexedFieldKey &field,
                                      bool descending,
                                      const std::function<bool(ItemId)> &visitor) const
@@ -847,6 +1339,51 @@ void RuntimeIndexStore::orderedField(const RuntimeIndexedFieldKey &field,
         return;
     }
     it->second.ordered(visitor, descending);
+}
+
+void RuntimeIndexStore::orderedIndex(const OrderedIndexDefinitionRecord &definition,
+                                     const std::vector<Value> &groupKey,
+                                     bool descending,
+                                     const std::function<bool(ItemId)> &visitor) const
+{
+    auto it = _orderedIndexes.find({definition.handle.containerId(), definition.handle.indexId()});
+    if (it == _orderedIndexes.end()) {
+        return;
+    }
+    it->second.ordered(definition, groupKey, descending, visitor);
+}
+
+std::optional<ItemId> RuntimeIndexStore::previous(const OrderedIndexDefinitionRecord &definition,
+                                                  const ItemSnapshot &probe,
+                                                  const std::set<ItemId> &excludedIds) const
+{
+    auto it = _orderedIndexes.find({definition.handle.containerId(), definition.handle.indexId()});
+    if (it == _orderedIndexes.end()) {
+        return {};
+    }
+    return it->second.previous(definition, probe, excludedIds);
+}
+
+std::optional<ItemId> RuntimeIndexStore::next(const OrderedIndexDefinitionRecord &definition,
+                                              const ItemSnapshot &probe,
+                                              const std::set<ItemId> &excludedIds) const
+{
+    auto it = _orderedIndexes.find({definition.handle.containerId(), definition.handle.indexId()});
+    if (it == _orderedIndexes.end()) {
+        return {};
+    }
+    return it->second.next(definition, probe, excludedIds);
+}
+
+std::vector<ItemId> RuntimeIndexStore::overlapping(const IntervalIndexDefinitionRecord &definition,
+                                                   const ItemSnapshot &probe,
+                                                   const std::set<ItemId> &excludedIds) const
+{
+    auto it = _intervalIndexes.find({definition.handle.containerId(), definition.handle.indexId()});
+    if (it == _intervalIndexes.end()) {
+        return {};
+    }
+    return it->second.overlapping(definition, probe, excludedIds);
 }
 
 std::size_t RuntimeIndexStore::countField(const RuntimeIndexedFieldKey &field,

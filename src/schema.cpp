@@ -58,6 +58,12 @@ namespace dini {
         return type == ValueType::Int64 || type == ValueType::UInt64 || type == ValueType::Double;
     }
 
+    bool typeSupportsOrderedIndex(ValueType type) noexcept
+    {
+        return type == ValueType::Int64 || type == ValueType::UInt64 || type == ValueType::Double ||
+               type == ValueType::String || type == ValueType::Bool;
+    }
+
     AggregateIndexOptions aggregateOptionsFor(const ColumnDefinitionRecord &column)
     {
         if (column.info.computed) {
@@ -146,6 +152,52 @@ namespace dini {
                         throw SchemaError("range index columns must be indexed numeric columns");
                     }
                 }
+            }
+            for (const auto &orderedIndex : container.orderedIndexes) {
+                if (orderedIndex.orderBy.empty()) {
+                    throw SchemaError("ordered index must contain at least one order column");
+                }
+                auto validateSameContainerColumn = [&](const ColumnHandle &columnHandle, const char *message) {
+                    if (!columnHandle.isValid() ||
+                        columnHandle.schemaId() != data.schemaId ||
+                        columnHandle.containerId() != container.info.id ||
+                        !findColumn(data, container.info.id, columnHandle.columnId())) {
+                        throw SchemaError(message);
+                    }
+                };
+                for (const auto &columnHandle : orderedIndex.groupBy) {
+                    validateSameContainerColumn(columnHandle, "ordered index group column must belong to its container");
+                }
+                for (const auto &columnHandle : orderedIndex.orderBy) {
+                    validateSameContainerColumn(columnHandle, "ordered index order column must belong to its container");
+                    const auto *column = findColumn(data, container.info.id, columnHandle.columnId());
+                    if (!column || !typeSupportsOrderedIndex(column->info.type)) {
+                        throw SchemaError("ordered index order columns must be comparable columns");
+                    }
+                }
+            }
+            for (const auto &intervalIndex : container.intervalIndexes) {
+                for (const auto &columnHandle : intervalIndex.groupBy) {
+                    if (!columnHandle.isValid() ||
+                        columnHandle.schemaId() != data.schemaId ||
+                        columnHandle.containerId() != container.info.id ||
+                        !findColumn(data, container.info.id, columnHandle.columnId())) {
+                        throw SchemaError("interval index group column must belong to its container");
+                    }
+                }
+                auto validateEndpoint = [&](const ColumnHandle &columnHandle) {
+                    if (!columnHandle.isValid() ||
+                        columnHandle.schemaId() != data.schemaId ||
+                        columnHandle.containerId() != container.info.id) {
+                        throw SchemaError("interval index endpoint column must belong to its container");
+                    }
+                    const auto *column = findColumn(data, container.info.id, columnHandle.columnId());
+                    if (!column || !typeSupportsRangeMaintenance(column->info.type)) {
+                        throw SchemaError("interval index endpoints must be numeric columns");
+                    }
+                };
+                validateEndpoint(intervalIndex.start);
+                validateEndpoint(intervalIndex.end);
             }
         }
     }
@@ -242,6 +294,62 @@ const RelationDefinitionRecord *findRelationByColumn(const SchemaDefinitionData 
     return it == container->relations.end() ? nullptr : &*it;
 }
 
+OrderedIndexDefinitionRecord *findOrderedIndex(SchemaDefinitionData &data,
+                                               ContainerId containerId,
+                                               std::uint32_t indexId)
+{
+    auto *container = findContainer(data, containerId);
+    if (!container) {
+        return nullptr;
+    }
+    auto it = std::find_if(container->orderedIndexes.begin(), container->orderedIndexes.end(), [indexId](const auto &index) {
+        return index.handle.indexId() == indexId;
+    });
+    return it == container->orderedIndexes.end() ? nullptr : &*it;
+}
+
+const OrderedIndexDefinitionRecord *findOrderedIndex(const SchemaDefinitionData &data,
+                                                     ContainerId containerId,
+                                                     std::uint32_t indexId)
+{
+    const auto *container = findContainer(data, containerId);
+    if (!container) {
+        return nullptr;
+    }
+    auto it = std::find_if(container->orderedIndexes.begin(), container->orderedIndexes.end(), [indexId](const auto &index) {
+        return index.handle.indexId() == indexId;
+    });
+    return it == container->orderedIndexes.end() ? nullptr : &*it;
+}
+
+IntervalIndexDefinitionRecord *findIntervalIndex(SchemaDefinitionData &data,
+                                                 ContainerId containerId,
+                                                 std::uint32_t indexId)
+{
+    auto *container = findContainer(data, containerId);
+    if (!container) {
+        return nullptr;
+    }
+    auto it = std::find_if(container->intervalIndexes.begin(), container->intervalIndexes.end(), [indexId](const auto &index) {
+        return index.handle.indexId() == indexId;
+    });
+    return it == container->intervalIndexes.end() ? nullptr : &*it;
+}
+
+const IntervalIndexDefinitionRecord *findIntervalIndex(const SchemaDefinitionData &data,
+                                                       ContainerId containerId,
+                                                       std::uint32_t indexId)
+{
+    const auto *container = findContainer(data, containerId);
+    if (!container) {
+        return nullptr;
+    }
+    auto it = std::find_if(container->intervalIndexes.begin(), container->intervalIndexes.end(), [indexId](const auto &index) {
+        return index.handle.indexId() == indexId;
+    });
+    return it == container->intervalIndexes.end() ? nullptr : &*it;
+}
+
 const SchemaDefinitionData &schemaData(const EngineSchema &schema)
 {
     return *schema._impl.constData();
@@ -333,6 +441,24 @@ void EngineSchema::validate(RelationHandle relation) const
     if (!isValid() || !relation.isValid() || relation.schemaId() != impl.schemaId ||
         !findRelation(impl, relation.containerId(), relation.relationId())) {
         throw HandleError("invalid relation handle");
+    }
+}
+
+void EngineSchema::validate(OrderedIndexHandle index) const
+{
+    __stdc_impl_t;
+    if (!isValid() || !index.isValid() || index.schemaId() != impl.schemaId ||
+        !findOrderedIndex(impl, index.containerId(), index.indexId())) {
+        throw HandleError("invalid ordered index handle");
+    }
+}
+
+void EngineSchema::validate(IntervalIndexHandle index) const
+{
+    __stdc_impl_t;
+    if (!isValid() || !index.isValid() || index.schemaId() != impl.schemaId ||
+        !findIntervalIndex(impl, index.containerId(), index.indexId())) {
+        throw HandleError("invalid interval index handle");
     }
 }
 
@@ -506,6 +632,38 @@ void TableBuilder::addRangeIndex(const RangeIndexDefinition &definition)
     container.rangeIndexes.push_back(std::move(record));
 }
 
+OrderedIndexHandle TableBuilder::addOrderedIndex(const OrderedIndexDefinition &definition)
+{
+    auto &container = requireContainer(_impl ? _impl->builder : nullptr, _impl ? _impl->containerId : 0);
+    OrderedIndexDefinitionRecord record;
+    record.debugName = definition.debugName;
+    record.groupBy = definition.groupBy;
+    record.orderBy = definition.orderBy;
+    record.tieBreakById = definition.tieBreakById;
+    record.handle = OrderedIndexHandle(_impl->builder->data.schemaId,
+                                       container.info.id,
+                                       _impl->builder->data.nextOrderedIndexId++,
+                                       record.debugName);
+    container.orderedIndexes.push_back(record);
+    return record.handle;
+}
+
+IntervalIndexHandle TableBuilder::addIntervalIndex(const IntervalIndexDefinition &definition)
+{
+    auto &container = requireContainer(_impl ? _impl->builder : nullptr, _impl ? _impl->containerId : 0);
+    IntervalIndexDefinitionRecord record;
+    record.debugName = definition.debugName;
+    record.groupBy = definition.groupBy;
+    record.start = definition.start;
+    record.end = definition.end;
+    record.handle = IntervalIndexHandle(_impl->builder->data.schemaId,
+                                        container.info.id,
+                                        _impl->builder->data.nextIntervalIndexId++,
+                                        record.debugName);
+    container.intervalIndexes.push_back(record);
+    return record.handle;
+}
+
 ListBuilder::ListBuilder() = default;
 ListBuilder::~ListBuilder() = default;
 ListBuilder::ListBuilder(ListBuilder &&other) noexcept = default;
@@ -592,6 +750,24 @@ void ListBuilder::addRangeIndex(const RangeIndexDefinition &definition)
     builder._impl->builder = _impl ? _impl->builder : nullptr;
     builder._impl->containerId = _impl ? _impl->containerId : 0;
     builder.addRangeIndex(definition);
+}
+
+OrderedIndexHandle ListBuilder::addOrderedIndex(const OrderedIndexDefinition &definition)
+{
+    TableBuilder builder;
+    builder._impl = std::make_unique<TableBuilder::Impl>();
+    builder._impl->builder = _impl ? _impl->builder : nullptr;
+    builder._impl->containerId = _impl ? _impl->containerId : 0;
+    return builder.addOrderedIndex(definition);
+}
+
+IntervalIndexHandle ListBuilder::addIntervalIndex(const IntervalIndexDefinition &definition)
+{
+    TableBuilder builder;
+    builder._impl = std::make_unique<TableBuilder::Impl>();
+    builder._impl->builder = _impl ? _impl->builder : nullptr;
+    builder._impl->containerId = _impl ? _impl->containerId : 0;
+    return builder.addIntervalIndex(definition);
 }
 
 } // namespace dini

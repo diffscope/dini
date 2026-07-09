@@ -1,6 +1,7 @@
 #ifndef DINI_HANDLES_H
 #define DINI_HANDLES_H
 
+#include <cstdint>
 #include <string>
 
 #include <dini/diniglobal.h>
@@ -621,6 +622,52 @@ public:
      * @post Returns true when both handles identify the same variant handle value.
      */
     DINI_EXPORT friend bool operator==(const VariantHandle &lhs, const VariantHandle &rhs);
+
+private:
+    struct Impl;
+    SharedDataPointer<Impl> _impl;
+};
+
+class DINI_EXPORT OrderedIndexHandle {
+public:
+    OrderedIndexHandle() noexcept;
+    OrderedIndexHandle(SchemaId schemaId, ContainerId containerId, std::uint32_t indexId, std::string debugName = {});
+    ~OrderedIndexHandle();
+    OrderedIndexHandle(const OrderedIndexHandle &other);
+    OrderedIndexHandle(OrderedIndexHandle &&other) noexcept;
+    OrderedIndexHandle &operator=(const OrderedIndexHandle &other);
+    OrderedIndexHandle &operator=(OrderedIndexHandle &&other) noexcept;
+
+    bool isValid() const noexcept;
+    SchemaId schemaId() const noexcept;
+    ContainerId containerId() const noexcept;
+    std::uint32_t indexId() const noexcept;
+    const std::string &debugName() const noexcept;
+
+    DINI_EXPORT friend bool operator==(const OrderedIndexHandle &lhs, const OrderedIndexHandle &rhs);
+
+private:
+    struct Impl;
+    SharedDataPointer<Impl> _impl;
+};
+
+class DINI_EXPORT IntervalIndexHandle {
+public:
+    IntervalIndexHandle() noexcept;
+    IntervalIndexHandle(SchemaId schemaId, ContainerId containerId, std::uint32_t indexId, std::string debugName = {});
+    ~IntervalIndexHandle();
+    IntervalIndexHandle(const IntervalIndexHandle &other);
+    IntervalIndexHandle(IntervalIndexHandle &&other) noexcept;
+    IntervalIndexHandle &operator=(const IntervalIndexHandle &other);
+    IntervalIndexHandle &operator=(IntervalIndexHandle &&other) noexcept;
+
+    bool isValid() const noexcept;
+    SchemaId schemaId() const noexcept;
+    ContainerId containerId() const noexcept;
+    std::uint32_t indexId() const noexcept;
+    const std::string &debugName() const noexcept;
+
+    DINI_EXPORT friend bool operator==(const IntervalIndexHandle &lhs, const IntervalIndexHandle &rhs);
 
 private:
     struct Impl;
