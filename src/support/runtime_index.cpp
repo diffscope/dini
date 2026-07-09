@@ -294,6 +294,98 @@ bool boundsInside(const RuntimeRangeConstraint &constraint, long double minValue
     return false;
 }
 
+bool columnAppliesToSnapshot(const ItemSnapshot &snapshot, const ColumnDefinitionRecord &column)
+{
+    return !column.info.variantSpecific ||
+           (snapshot.variant && snapshot.variant->variantId() == column.variantId);
+}
+
+bool valueChangedForColumn(const ItemSnapshot &oldSnapshot,
+                           const ItemSnapshot &newSnapshot,
+                           ColumnId columnId)
+{
+    return valueForColumn(oldSnapshot, columnId) != valueForColumn(newSnapshot, columnId);
+}
+
+bool anyColumnChanged(const ItemSnapshot &oldSnapshot,
+                      const ItemSnapshot &newSnapshot,
+                      const std::vector<ColumnHandle> &columns)
+{
+    return std::any_of(columns.begin(), columns.end(), [&](const auto &column) {
+        return valueChangedForColumn(oldSnapshot, newSnapshot, column.columnId());
+    });
+}
+
+bool variantChanged(const ItemSnapshot &oldSnapshot, const ItemSnapshot &newSnapshot)
+{
+    if (oldSnapshot.variant.has_value() != newSnapshot.variant.has_value()) {
+        return true;
+    }
+    if (!oldSnapshot.variant) {
+        return false;
+    }
+    return oldSnapshot.variant->variantId() != newSnapshot.variant->variantId();
+}
+
+bool updateTouchesRuntimeIndexes(const SchemaDefinitionData &schemaDefinition,
+                                 const ItemSnapshot &oldSnapshot,
+                                 const ItemSnapshot &newSnapshot)
+{
+    if (oldSnapshot.id != newSnapshot.id ||
+        oldSnapshot.containerId != newSnapshot.containerId ||
+        oldSnapshot.containerKind != newSnapshot.containerKind ||
+        variantChanged(oldSnapshot, newSnapshot)) {
+        return true;
+    }
+
+    const auto *container = findContainer(schemaDefinition, oldSnapshot.containerId);
+    if (!container) {
+        return false;
+    }
+
+    for (const auto &relation : container->relations) {
+        if (valueChangedForColumn(oldSnapshot, newSnapshot, relation.info.column.columnId())) {
+            return true;
+        }
+    }
+
+    for (const auto &rangeIndex : container->rangeIndexes) {
+        if (anyColumnChanged(oldSnapshot, newSnapshot, rangeIndex.columns)) {
+            return true;
+        }
+    }
+
+    for (const auto &orderedIndex : container->orderedIndexes) {
+        if (anyColumnChanged(oldSnapshot, newSnapshot, orderedIndex.groupBy) ||
+            anyColumnChanged(oldSnapshot, newSnapshot, orderedIndex.orderBy)) {
+            return true;
+        }
+    }
+
+    for (const auto &intervalIndex : container->intervalIndexes) {
+        if (anyColumnChanged(oldSnapshot, newSnapshot, intervalIndex.groupBy) ||
+            valueChangedForColumn(oldSnapshot, newSnapshot, intervalIndex.start.columnId()) ||
+            valueChangedForColumn(oldSnapshot, newSnapshot, intervalIndex.end.columnId())) {
+            return true;
+        }
+    }
+
+    for (const auto &column : container->columns) {
+        if (!columnAppliesToSnapshot(oldSnapshot, column) &&
+            !columnAppliesToSnapshot(newSnapshot, column)) {
+            continue;
+        }
+        if (!valueChangedForColumn(oldSnapshot, newSnapshot, column.info.id)) {
+            continue;
+        }
+        if (columnIsIndexed(column) || aggregateEnabled(aggregateOptionsFor(column))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 } // namespace
 
 bool operator<(const RuntimeIndexedFieldKey &lhs, const RuntimeIndexedFieldKey &rhs) noexcept
@@ -1293,6 +1385,17 @@ void RuntimeIndexStore::removeItem(const SchemaDefinitionData &schemaDefinition,
         }
     }
     _rangeIndex.remove(snapshot.containerId, snapshot.id);
+}
+
+void RuntimeIndexStore::updateItem(const SchemaDefinitionData &schemaDefinition,
+                                   const ItemSnapshot &oldSnapshot,
+                                   const ItemSnapshot &newSnapshot)
+{
+    if (!updateTouchesRuntimeIndexes(schemaDefinition, oldSnapshot, newSnapshot)) {
+        return;
+    }
+    removeItem(schemaDefinition, oldSnapshot);
+    addItem(schemaDefinition, newSnapshot);
 }
 
 const RuntimeItemIdSet &RuntimeIndexStore::containerItems(ContainerId containerId) const

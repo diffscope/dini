@@ -306,6 +306,13 @@ namespace dini {
         engine.indexes.removeItem(schemaData(engine.schema), snapshot);
     }
 
+    void updateItemInIndexes(DocumentEngine::Impl &engine,
+                             const ItemSnapshot &oldSnapshot,
+                             const ItemSnapshot &newSnapshot)
+    {
+        engine.indexes.updateItem(schemaData(engine.schema), oldSnapshot, newSnapshot);
+    }
+
     void rebuildIndexes(DocumentEngine::Impl &engine)
     {
         engine.indexes.clear();
@@ -313,6 +320,89 @@ namespace dini {
             (void)id;
             addItemToIndexes(engine, item.snapshot);
         }
+    }
+
+    void recordRollbackItem(Transaction::Impl &transaction, ItemId itemId)
+    {
+        if (!transaction.engine || transaction.rollbackItems.find(itemId) != transaction.rollbackItems.end()) {
+            return;
+        }
+        auto it = transaction.engine->items.find(itemId);
+        if (it == transaction.engine->items.end()) {
+            transaction.rollbackItems.emplace(itemId, std::nullopt);
+            return;
+        }
+        transaction.rollbackItems.emplace(itemId, it->second);
+    }
+
+    void recordRollbackListGroup(Transaction::Impl &transaction, ContainerId containerId, const std::string &key)
+    {
+        if (!transaction.engine) {
+            return;
+        }
+        const auto groupKey = std::make_pair(containerId, key);
+        if (transaction.rollbackListGroups.find(groupKey) != transaction.rollbackListGroups.end()) {
+            return;
+        }
+        auto it = transaction.engine->listGroups.find(groupKey);
+        if (it == transaction.engine->listGroups.end()) {
+            transaction.rollbackListGroups.emplace(groupKey, std::nullopt);
+            return;
+        }
+        transaction.rollbackListGroups.emplace(groupKey, it->second);
+    }
+
+    void recordRollbackListGroupForSnapshot(Transaction::Impl &transaction, const ItemSnapshot &snapshot)
+    {
+        if (snapshot.containerKind != ContainerKind::List || !snapshot.listAssociationValue ||
+            snapshot.listAssociationValue->isNull()) {
+            return;
+        }
+        recordRollbackListGroup(transaction, snapshot.containerId, valueKey(*snapshot.listAssociationValue));
+    }
+
+    void recordRollbackForSnapshotInsert(Transaction::Impl &transaction, const ItemSnapshot &snapshot)
+    {
+        recordRollbackItem(transaction, snapshot.id);
+        recordRollbackListGroupForSnapshot(transaction, snapshot);
+    }
+
+    void recordRollbackForSnapshotRemove(Transaction::Impl &transaction, const ItemSnapshot &snapshot)
+    {
+        recordRollbackItem(transaction, snapshot.id);
+        recordRollbackListGroupForSnapshot(transaction, snapshot);
+    }
+
+    void recordRollbackForSnapshotUpdate(Transaction::Impl &transaction,
+                                         const ItemSnapshot &oldSnapshot,
+                                         const ItemSnapshot &newSnapshot)
+    {
+        recordRollbackItem(transaction, oldSnapshot.id);
+        recordRollbackListGroupForSnapshot(transaction, oldSnapshot);
+        recordRollbackListGroupForSnapshot(transaction, newSnapshot);
+    }
+
+    void restoreRollbackJournal(Transaction::Impl &transaction)
+    {
+        auto *engine = transaction.engine;
+        if (!engine) {
+            return;
+        }
+        for (const auto &[itemId, item] : transaction.rollbackItems) {
+            if (item) {
+                engine->items[itemId] = *item;
+            } else {
+                engine->items.erase(itemId);
+            }
+        }
+        for (const auto &[key, group] : transaction.rollbackListGroups) {
+            if (group) {
+                engine->listGroups[key] = *group;
+            } else {
+                engine->listGroups.erase(key);
+            }
+        }
+        rebuildIndexes(*engine);
     }
 
     bool valueMatchesType(const Value &value, ValueType type, bool nullable)
@@ -553,9 +643,7 @@ namespace dini {
         if (transaction.state == TransactionState::Active) {
             transaction.state = TransactionState::Failed;
             if (transaction.engine && !transaction.rollbackApplied) {
-                transaction.engine->items = transaction.rollbackItems;
-                transaction.engine->listGroups = transaction.rollbackListGroups;
-                transaction.engine->indexes = transaction.rollbackIndexes;
+                restoreRollbackJournal(transaction);
                 transaction.engine->activeTransaction = false;
                 transaction.rollbackApplied = true;
             }
@@ -1189,20 +1277,19 @@ namespace dini {
                     }
                     applyRelationMetadata(schemaDefinition, snapshot);
                     validateSnapshot(engine, snapshot, &oldSnapshot);
-                    removeItemFromIndexes(engine, oldSnapshot);
                     removeFromListGroup(engine, oldSnapshot);
                     it->second.snapshot = snapshot;
                     insertIntoListGroup(engine, snapshot);
-                    addItemToIndexes(engine, snapshot);
+                    updateItemInIndexes(engine, oldSnapshot, snapshot);
                 } else if constexpr (std::is_same_v<T, ComputedColumnUpdatedChange>) {
                     engine.schema.validate(change.column);
                     auto it = engine.items.find(change.itemId);
                     if (it == engine.items.end()) {
                         throw RecoveryError("updated item does not exist");
                     }
-                    removeItemFromIndexes(engine, it->second.snapshot);
+                    auto oldSnapshot = it->second.snapshot;
                     setColumnValue(it->second.snapshot, change.column, change.newValue);
-                    addItemToIndexes(engine, it->second.snapshot);
+                    updateItemInIndexes(engine, oldSnapshot, it->second.snapshot);
                 } else if constexpr (std::is_same_v<T, ListInsertedChange>) {
                     insertSnapshot(engine, change.item);
                 } else if constexpr (std::is_same_v<T, ListRemovedChange>) {
@@ -2309,9 +2396,6 @@ Transaction DocumentEngine::beginTransaction(TransactionOptions options)
     data->engine = _impl.get();
     data->options = options;
     data->state = TransactionState::Active;
-    data->rollbackItems = _impl->items;
-    data->rollbackListGroups = _impl->listGroups;
-    data->rollbackIndexes = _impl->indexes;
     _impl->activeTransaction = true;
     return Transaction(std::move(data));
 }
@@ -2955,6 +3039,7 @@ ItemId Transaction::insert(TableHandle table, std::vector<ColumnValue> values, s
         }
         const auto derivedEnd = _impl->changeSet.operations().size();
         operationChange = insertChangeSetForSnapshot(schemaDefinition, snapshot);
+        recordRollbackForSnapshotInsert(*_impl, snapshot);
         insertSnapshot(engine, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
@@ -2991,8 +3076,9 @@ ItemId Transaction::insert(ListHandle list,
         const auto *relation = findRelation(schemaDefinition, list.containerId(), *container.listAssociation);
         if (!associationValue.isNull()) {
             auto groupKey = valueKey(associationValue);
-            auto &group = engine.listGroups[{list.containerId(), groupKey}];
-            if (index > group.size()) {
+            auto groupIt = engine.listGroups.find({list.containerId(), groupKey});
+            const auto groupSize = groupIt == engine.listGroups.end() ? std::size_t {0} : groupIt->second.size();
+            if (index > groupSize) {
                 throw ConstraintError("list insertion index is out of range");
             }
         } else if (index != 0) {
@@ -3032,6 +3118,7 @@ ItemId Transaction::insert(ListHandle list,
                                                                associationValue,
                                                                index,
                                                                snapshot);
+        recordRollbackForSnapshotInsert(*_impl, snapshot);
         insertSnapshot(engine, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
@@ -3095,6 +3182,9 @@ void Transaction::remove(ItemId itemId)
         runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
         const auto derivedEnd = _impl->changeSet.operations().size();
         for (const auto &snapshot : toRemove) {
+            recordRollbackForSnapshotRemove(*_impl, snapshot);
+        }
+        for (const auto &snapshot : toRemove) {
             eraseSnapshot(engine, snapshot);
         }
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
@@ -3138,6 +3228,7 @@ void Transaction::removeAt(ListHandle list, Value associationValue, std::size_t 
         const auto derivedStart = _impl->changeSet.operations().size();
         runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
         const auto derivedEnd = _impl->changeSet.operations().size();
+        recordRollbackForSnapshotRemove(*_impl, snapshot);
         eraseSnapshot(engine, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
@@ -3225,11 +3316,11 @@ void Transaction::update(ItemId itemId, ColumnHandle column, Value value, Associ
                                                      options,
                                                      oldSnapshot.listIndex,
                                                      snapshot);
-        removeItemFromIndexes(engine, oldSnapshot);
+        recordRollbackForSnapshotUpdate(*_impl, oldSnapshot, snapshot);
         removeFromListGroup(engine, oldSnapshot);
         it->second.snapshot = snapshot;
         insertIntoListGroup(engine, snapshot);
-        addItemToIndexes(engine, snapshot);
+        updateItemInIndexes(engine, oldSnapshot, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
         runHooks(engine, HookStage::AfterApply, afterContext, operationChange, false);
@@ -3328,11 +3419,11 @@ void Transaction::update(ItemId itemId, std::vector<ColumnValue> values)
                                                      values,
                                                      oldValues,
                                                      snapshot);
-        removeItemFromIndexes(engine, oldSnapshot);
+        recordRollbackForSnapshotUpdate(*_impl, oldSnapshot, snapshot);
         removeFromListGroup(engine, oldSnapshot);
         it->second.snapshot = snapshot;
         insertIntoListGroup(engine, snapshot);
-        addItemToIndexes(engine, snapshot);
+        updateItemInIndexes(engine, oldSnapshot, snapshot);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
         runHooks(engine, HookStage::AfterApply, afterContext, operationChange, false);
@@ -3356,8 +3447,9 @@ void Transaction::rotate(ListHandle list, Value associationValue, ListRotation r
             return TransactionContext(std::move(data));
         };
         auto key = valueKey(associationValue);
-        auto &group = engine.listGroups[{list.containerId(), key}];
-        if (rotation.startIndex + rotation.count > group.size()) {
+        auto groupIt = engine.listGroups.find({list.containerId(), key});
+        const auto groupSize = groupIt == engine.listGroups.end() ? std::size_t {0} : groupIt->second.size();
+        if (rotation.startIndex + rotation.count > groupSize) {
             throw QueryError("list rotation range is out of range");
         }
         ChangeSet operationChange;
@@ -3371,7 +3463,9 @@ void Transaction::rotate(ListHandle list, Value associationValue, ListRotation r
         const auto derivedStart = _impl->changeSet.operations().size();
         runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
         const auto derivedEnd = _impl->changeSet.operations().size();
-        if (rotation.count > 0) {
+        if (rotation.count > 0 && groupIt != engine.listGroups.end()) {
+            auto &group = groupIt->second;
+            recordRollbackListGroup(*_impl, list.containerId(), key);
             auto first = group.begin() + static_cast<std::ptrdiff_t>(rotation.startIndex);
             auto last = first + static_cast<std::ptrdiff_t>(rotation.count);
             auto shift = rotation.offset % static_cast<std::ptrdiff_t>(rotation.count);
@@ -3445,9 +3539,7 @@ void Transaction::rollback()
     try {
         applyChangeSet(engine, inverse);
     } catch (...) {
-        engine.items = _impl->rollbackItems;
-        engine.listGroups = _impl->rollbackListGroups;
-        engine.indexes = _impl->rollbackIndexes;
+        restoreRollbackJournal(*_impl);
         throw;
     }
     _impl->state = TransactionState::RolledBack;

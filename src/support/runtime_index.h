@@ -204,6 +204,9 @@ public:
     void clear();
     void addItem(const SchemaDefinitionData &schemaDefinition, const ItemSnapshot &snapshot);
     void removeItem(const SchemaDefinitionData &schemaDefinition, const ItemSnapshot &snapshot);
+    void updateItem(const SchemaDefinitionData &schemaDefinition,
+                    const ItemSnapshot &oldSnapshot,
+                    const ItemSnapshot &newSnapshot);
 
     const RuntimeItemIdSet &containerItems(ContainerId containerId) const;
     RuntimeItemIdSet queryField(const RuntimeIndexedFieldKey &field, ComparisonOperator op, const Value &value) const;
