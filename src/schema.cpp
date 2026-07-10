@@ -9,11 +9,117 @@
 
 #include <dini/errors.h>
 
+#include "change_p.h"
+
 namespace dini {
 
     namespace {
 
     std::atomic<SchemaId> nextSchemaId {1};
+    constexpr std::uint8_t schemaStructureMagic[] = {0x7f, 'D', 'I', 'N', 'I', 'S', 'C', '2'};
+    constexpr std::uint32_t schemaStructureVersion = 2;
+
+    ContainerId associationTargetContainerId(const AssociationTarget &target)
+    {
+        return std::visit([](const auto &handle) { return handle.containerId(); }, target);
+    }
+
+    AggregateIndexOptions aggregateOptionsFor(const ColumnDefinitionRecord &column);
+
+    void writeColumnReference(BinaryWriter &writer, const ColumnHandle &column)
+    {
+        writer.writeUInt32(column.containerId());
+        writer.writeUInt32(column.columnId());
+    }
+
+    void writeAggregateOptions(BinaryWriter &writer, const AggregateIndexOptions &options)
+    {
+        writer.writeBool(options.sum);
+        writer.writeBool(options.minMax);
+        writer.writeBool(options.byParent);
+    }
+
+    ByteArray serializeSchemaStructureData(const SchemaDefinitionData &data)
+    {
+        BinaryWriter writer;
+        for (auto byte : schemaStructureMagic) {
+            writer.writeByte(byte);
+        }
+        writer.writeUInt32(schemaStructureVersion);
+        writer.writeSize(data.containers.size());
+        for (const auto &container : data.containers) {
+            writer.writeByte(static_cast<std::uint8_t>(container.info.kind));
+            writer.writeUInt32(container.info.id);
+            writer.writeString(container.info.debugName);
+            writer.writeUInt32(container.listAssociation.value_or(0));
+
+            writer.writeSize(container.columns.size());
+            for (const auto &column : container.columns) {
+                writer.writeUInt32(column.info.id);
+                writer.writeString(column.info.debugName);
+                writer.writeByte(static_cast<std::uint8_t>(column.info.type));
+                writer.writeByte(static_cast<std::uint8_t>(column.info.index));
+                writer.writeBool(column.info.computed);
+                writer.writeBool(column.info.association);
+                writer.writeBool(column.info.variantSpecific);
+                writer.writeUInt32(column.variantId.value_or(0));
+                writeAggregateOptions(writer, aggregateOptionsFor(column));
+                writer.writeSize(column.computedDefinition.dependsOn.size());
+                for (const auto &dependency : column.computedDefinition.dependsOn) {
+                    writeColumnReference(writer, dependency);
+                }
+            }
+
+            writer.writeSize(container.rangeIndexes.size());
+            for (const auto &rangeIndex : container.rangeIndexes) {
+                writer.writeString(rangeIndex.debugName);
+                writer.writeSize(rangeIndex.columns.size());
+                for (const auto &column : rangeIndex.columns) {
+                    writeColumnReference(writer, column);
+                }
+            }
+
+            writer.writeSize(container.orderedIndexes.size());
+            for (const auto &orderedIndex : container.orderedIndexes) {
+                writer.writeString(orderedIndex.debugName);
+                writer.writeSize(orderedIndex.groupBy.size());
+                for (const auto &column : orderedIndex.groupBy) {
+                    writeColumnReference(writer, column);
+                }
+                writer.writeSize(orderedIndex.orderBy.size());
+                for (const auto &column : orderedIndex.orderBy) {
+                    writeColumnReference(writer, column);
+                }
+                writer.writeBool(orderedIndex.tieBreakById);
+            }
+
+            writer.writeSize(container.intervalIndexes.size());
+            for (const auto &intervalIndex : container.intervalIndexes) {
+                writer.writeString(intervalIndex.debugName);
+                writer.writeSize(intervalIndex.groupBy.size());
+                for (const auto &column : intervalIndex.groupBy) {
+                    writeColumnReference(writer, column);
+                }
+                writeColumnReference(writer, intervalIndex.start);
+                writeColumnReference(writer, intervalIndex.end);
+            }
+
+            writer.writeSize(container.relations.size());
+            for (const auto &relation : container.relations) {
+                writer.writeUInt32(relation.info.id);
+                writer.writeUInt32(relation.info.column.columnId());
+                writer.writeUInt32(associationTargetContainerId(relation.info.target));
+            }
+
+            writer.writeSize(container.variants.size());
+            for (const auto &variant : container.variants) {
+                writer.writeUInt32(variant.id);
+                writer.writeString(variant.debugName);
+            }
+        }
+        return std::move(writer.bytes);
+    }
+
     void requireMutable(const SchemaBuilder::Impl *builder)
     {
         if (!builder) {
@@ -376,6 +482,20 @@ SchemaId EngineSchema::schemaId() const
         throw SchemaError("schema is invalid");
     }
     return impl.schemaId;
+}
+
+ByteArray EngineSchema::serializeStructure() const
+{
+    __stdc_impl_t;
+    if (!isValid()) {
+        throw SchemaError("schema is invalid");
+    }
+    return serializeSchemaStructureData(impl);
+}
+
+bool EngineSchema::matchesSerializedStructure(const ByteArray &bytes) const
+{
+    return serializeStructure() == bytes;
 }
 
 ContainerInfo EngineSchema::tableInfo(TableHandle table) const

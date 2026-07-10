@@ -47,8 +47,8 @@ struct UndoStep::Impl : SharedData {
     }
 };
 
-ByteArray serializeChangeSetForLog(const ChangeSet &changeSet);
-ChangeSet deserializeChangeSetFromLog(const ByteArray &bytes);
+ByteArray serializeChangeSet(const ChangeSet &changeSet);
+ChangeSet deserializeChangeSet(const ByteArray &bytes);
 
 struct BinaryWriter {
     ByteArray bytes;

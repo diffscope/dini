@@ -16,7 +16,7 @@ namespace dini {
  * @brief Variant-like value object for all engine-supported scalar values.
  *
  * Value is the only public runtime value carrier used by columns, query
- * predicates, snapshots, logs, and change records. It deliberately supports only
+ * predicates, snapshots, serialized change sets, and change records. It deliberately supports only
  * the built-in type set from the engine specification and does not provide custom
  * type registration.
  */

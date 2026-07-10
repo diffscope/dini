@@ -856,7 +856,7 @@ TEST(DocumentEngineListTest, ListUndoRedoNullAssociationInsert)
     EXPECT_FALSE(engine.read(element).listAssociationValue.has_value());
 }
 
-TEST(DocumentEngineListTest, ListNullAssociationSurvivesSnapshotAndLogReplay)
+TEST(DocumentEngineListTest, ListNullAssociationSurvivesSnapshotAndChangeSetReplay)
 {
     const PlaylistSchema ps;
     DocumentEngine engine(ps.schema);
@@ -879,7 +879,7 @@ TEST(DocumentEngineListTest, ListNullAssociationSurvivesSnapshotAndLogReplay)
     EXPECT_FALSE(restored.read(element).listAssociationValue.has_value());
 
     DocumentEngine replayed(ps.schema);
-    replayed.replayCommitLog(result.commitLog);
+    replayed.replayChangeSet(ChangeSet::deserialize(result.changeSet.serialize()));
     EXPECT_TRUE(replayed.contains(element));
     EXPECT_TRUE(replayed.read(element, ps.playlistAssociation.column()).isNull());
     EXPECT_FALSE(replayed.read(element).listAssociationValue.has_value());

@@ -9,23 +9,22 @@ namespace dini {
 
     namespace {
 
-    // Magic does not need to be changed during development, even if the format changes.
-    
-    constexpr std::uint8_t logMagic[] = {'D', 'I', 'N', 'I', 'C', 'S', '2'};
-    constexpr std::uint32_t logFormatVersion = 2;
+    // Magic and version does not need to be changed during development, even if the format changes.
+    constexpr std::uint8_t changeSetMagic[] = {0x7f, 'D', 'I', 'N', 'I', 'C', 'S', '2'};
+    constexpr std::uint32_t changeSetFormatVersion = 2;
 
     void writeMagic(BinaryWriter &writer)
     {
-        for (auto byte : logMagic) {
+        for (auto byte : changeSetMagic) {
             writer.writeByte(byte);
         }
     }
 
     void readMagic(BinaryReader &reader)
     {
-        for (auto expected : logMagic) {
+        for (auto expected : changeSetMagic) {
             if (reader.readByte() != expected) {
-                throw LogError("invalid change log magic");
+                throw LogError("invalid change set magic");
             }
         }
     }
@@ -468,11 +467,11 @@ ItemSnapshot readItemSnapshot(BinaryReader &reader)
     return snapshot;
 }
 
-ByteArray serializeChangeSetForLog(const ChangeSet &changeSet)
+ByteArray serializeChangeSet(const ChangeSet &changeSet)
 {
     BinaryWriter writer;
     writeMagic(writer);
-    writer.writeUInt32(logFormatVersion);
+    writer.writeUInt32(changeSetFormatVersion);
     writer.writeSize(changeSet.operations().size());
     for (const auto &operation : changeSet.operations()) {
         writeOperation(writer, operation);
@@ -485,13 +484,13 @@ ByteArray serializeChangeSetForLog(const ChangeSet &changeSet)
     return std::move(writer.bytes);
 }
 
-ChangeSet deserializeChangeSetFromLog(const ByteArray &bytes)
+ChangeSet deserializeChangeSet(const ByteArray &bytes)
 {
     BinaryReader reader(bytes);
     readMagic(reader);
     const auto version = reader.readUInt32();
-    if (version != logFormatVersion) {
-        throw LogError("unsupported change log version");
+    if (version != changeSetFormatVersion) {
+        throw LogError("unsupported change set version");
     }
     ChangeSet changeSet;
     const auto operationCount = reader.readSize();
@@ -506,7 +505,7 @@ ChangeSet deserializeChangeSetFromLog(const ByteArray &bytes)
         });
     }
     if (!reader.atEnd()) {
-        throw LogError("trailing bytes after change log");
+        throw LogError("trailing bytes after change set");
     }
     return changeSet;
 }

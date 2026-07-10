@@ -21,10 +21,8 @@ namespace dini {
 
     namespace {
 
-    constexpr std::uint8_t snapshotMagic[] = {'D', 'I', 'N', 'I', 'S', 'N', 'A', 'P', '2'};
-    constexpr std::uint8_t commitLogEnvelopeMagic[] = {'D', 'I', 'N', 'I', 'L', 'O', 'G', '2'};
+    constexpr std::uint8_t snapshotMagic[] = {0x7f, 'D', 'I', 'N', 'I', 'S', 'N', '2'};
     constexpr std::uint32_t snapshotFormatVersion = 2;
-    constexpr std::uint32_t commitLogEnvelopeVersion = 1;
     constexpr std::size_t maxHookDepth = 32;
 
     std::string valueKey(const Value &value)
@@ -60,95 +58,6 @@ namespace dini {
     ContainerId associationTargetContainerId(const AssociationTarget &target)
     {
         return std::visit([](const auto &handle) { return handle.containerId(); }, target);
-    }
-
-    void hashCombine(std::uint64_t &seed, std::uint64_t value) noexcept
-    {
-        seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
-    }
-
-    void hashString(std::uint64_t &seed, const std::string &value) noexcept
-    {
-        for (const auto ch : value) {
-            hashCombine(seed, static_cast<unsigned char>(ch));
-        }
-    }
-
-    std::uint64_t schemaFingerprint(const SchemaDefinitionData &schemaDefinition)
-    {
-        std::uint64_t hash = 1469598103934665603ULL;
-        for (const auto &container : schemaDefinition.containers) {
-            hashCombine(hash, static_cast<std::uint64_t>(container.info.kind));
-            hashCombine(hash, container.info.id);
-            hashString(hash, container.info.debugName);
-            hashCombine(hash, container.listAssociation.value_or(0));
-            for (const auto &column : container.columns) {
-                hashCombine(hash, column.info.id);
-                hashString(hash, column.info.debugName);
-                hashCombine(hash, static_cast<std::uint64_t>(column.info.type));
-                hashCombine(hash, static_cast<std::uint64_t>(column.info.index));
-                hashCombine(hash, column.info.computed ? 1 : 0);
-                hashCombine(hash, column.info.association ? 1 : 0);
-                hashCombine(hash, column.info.variantSpecific ? 1 : 0);
-                hashCombine(hash, column.variantId.value_or(0));
-                const auto aggregate = column.info.computed
-                    ? column.computedDefinition.aggregateIndex
-                    : (column.info.variantSpecific
-                           ? column.variantDefinition.aggregateIndex
-                           : column.normalDefinition.aggregateIndex);
-                hashCombine(hash, aggregate.sum ? 1 : 0);
-                hashCombine(hash, aggregate.minMax ? 1 : 0);
-                hashCombine(hash, aggregate.byParent ? 1 : 0);
-                for (const auto &dependency : column.computedDefinition.dependsOn) {
-                    hashCombine(hash, dependency.containerId());
-                    hashCombine(hash, dependency.columnId());
-                }
-            }
-            for (const auto &rangeIndex : container.rangeIndexes) {
-                hashString(hash, rangeIndex.debugName);
-                hashCombine(hash, rangeIndex.columns.size());
-                for (const auto &column : rangeIndex.columns) {
-                    hashCombine(hash, column.containerId());
-                    hashCombine(hash, column.columnId());
-                }
-            }
-            for (const auto &orderedIndex : container.orderedIndexes) {
-                hashString(hash, orderedIndex.debugName);
-                hashCombine(hash, orderedIndex.groupBy.size());
-                for (const auto &column : orderedIndex.groupBy) {
-                    hashCombine(hash, column.containerId());
-                    hashCombine(hash, column.columnId());
-                }
-                hashCombine(hash, orderedIndex.orderBy.size());
-                for (const auto &column : orderedIndex.orderBy) {
-                    hashCombine(hash, column.containerId());
-                    hashCombine(hash, column.columnId());
-                }
-                hashCombine(hash, orderedIndex.tieBreakById ? 1 : 0);
-            }
-            for (const auto &intervalIndex : container.intervalIndexes) {
-                hashString(hash, intervalIndex.debugName);
-                hashCombine(hash, intervalIndex.groupBy.size());
-                for (const auto &column : intervalIndex.groupBy) {
-                    hashCombine(hash, column.containerId());
-                    hashCombine(hash, column.columnId());
-                }
-                hashCombine(hash, intervalIndex.start.containerId());
-                hashCombine(hash, intervalIndex.start.columnId());
-                hashCombine(hash, intervalIndex.end.containerId());
-                hashCombine(hash, intervalIndex.end.columnId());
-            }
-            for (const auto &relation : container.relations) {
-                hashCombine(hash, relation.info.id);
-                hashCombine(hash, relation.info.column.columnId());
-                hashCombine(hash, associationTargetContainerId(relation.info.target));
-            }
-            for (const auto &variant : container.variants) {
-                hashCombine(hash, variant.id);
-                hashString(hash, variant.debugName);
-            }
-        }
-        return hash;
     }
 
     std::uint64_t unixSecondsNow()
@@ -2369,69 +2278,6 @@ namespace dini {
         }
     }
 
-    void writeCommitLogEnvelopeMagic(BinaryWriter &writer)
-    {
-        for (auto byte : commitLogEnvelopeMagic) {
-            writer.writeByte(byte);
-        }
-    }
-
-    bool hasCommitLogEnvelopeMagic(const ByteArray &bytes)
-    {
-        if (bytes.size() < sizeof(commitLogEnvelopeMagic)) {
-            return false;
-        }
-        for (std::size_t i = 0; i < sizeof(commitLogEnvelopeMagic); ++i) {
-            if (bytes[i] != commitLogEnvelopeMagic[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    void readCommitLogEnvelopeMagic(BinaryReader &reader)
-    {
-        for (auto expected : commitLogEnvelopeMagic) {
-            if (reader.readByte() != expected) {
-                throw RecoveryError("invalid commit log envelope magic");
-            }
-        }
-    }
-
-    ByteArray serializeEngineCommitLog(const EngineSchema &schema, const ChangeSet &changeSet)
-    {
-        BinaryWriter writer;
-        writeCommitLogEnvelopeMagic(writer);
-        writer.writeUInt32(commitLogEnvelopeVersion);
-        writer.writeUInt64(schema.schemaId());
-        writer.writeUInt64(schemaFingerprint(schemaData(schema)));
-        writer.writeBytes(changeSet.serializeForLog());
-        return std::move(writer.bytes);
-    }
-
-    ChangeSet deserializeEngineCommitLog(const EngineSchema &schema, const ByteArray &bytes)
-    {
-        if (!hasCommitLogEnvelopeMagic(bytes)) {
-            return deserializeChangeSetFromLog(bytes);
-        }
-        BinaryReader reader(bytes);
-        readCommitLogEnvelopeMagic(reader);
-        const auto version = reader.readUInt32();
-        if (version != commitLogEnvelopeVersion) {
-            throw RecoveryError("unsupported commit log envelope version");
-        }
-        const auto schemaId = reader.readUInt64();
-        const auto fingerprint = reader.readUInt64();
-        if (schemaId != schema.schemaId() || fingerprint != schemaFingerprint(schemaData(schema))) {
-            throw RecoveryError("commit log schema does not match engine schema");
-        }
-        const auto innerLog = reader.readBytes();
-        if (!reader.atEnd()) {
-            throw RecoveryError("trailing bytes after commit log envelope");
-        }
-        return deserializeChangeSetFromLog(innerLog);
-    }
-
     } // namespace
 
 DocumentEngine::DocumentEngine(EngineSchema schema) : _impl(std::make_unique<Impl>(std::move(schema)))
@@ -2700,7 +2546,7 @@ ByteArray DocumentEngine::createSnapshot() const
     writeSnapshotMagic(writer);
     writer.writeUInt32(snapshotFormatVersion);
     writer.writeUInt64(_impl->schema.schemaId());
-    writer.writeUInt64(schemaFingerprint(schemaData(_impl->schema)));
+    writer.writeBytes(_impl->schema.serializeStructure());
     writer.writeUInt64(_impl->epochSeconds);
     writer.writeUInt32(_impl->currentElapsedSecond);
     writer.writeUInt32(_impl->currentSecondCounter);
@@ -2727,9 +2573,9 @@ void DocumentEngine::restoreSnapshot(const ByteArray &snapshot)
             throw RecoveryError("unsupported snapshot format version");
         }
         const auto schemaId = reader.readUInt64();
-        const auto fingerprint = reader.readUInt64();
+        const auto serializedSchema = reader.readBytes();
         if (schemaId != _impl->schema.schemaId() ||
-            fingerprint != schemaFingerprint(schemaData(_impl->schema))) {
+            !_impl->schema.matchesSerializedStructure(serializedSchema)) {
             throw RecoveryError("snapshot schema does not match engine schema");
         }
         _impl->epochSeconds = reader.readUInt64();
@@ -2779,13 +2625,9 @@ void DocumentEngine::restoreSnapshot(const ByteArray &snapshot)
     }
 }
 
-void DocumentEngine::replayCommitLog(const ByteArray &commitLog)
+void DocumentEngine::replayChangeSet(const ChangeSet &changeSet)
 {
-    if (commitLog.empty()) {
-        return;
-    }
     try {
-        auto changeSet = deserializeEngineCommitLog(_impl->schema, commitLog);
         applyChangeSet(*_impl, changeSet);
     } catch (const DiniError &) {
         throw;
@@ -2830,7 +2672,6 @@ CommitResult DocumentEngine::undo()
     publish(*_impl, EventKind::AfterCommit, EventOrigin::Undo, inverse);
     return CommitResult {
         .changeSet = inverse,
-        .commitLog = serializeEngineCommitLog(_impl->schema, inverse),
         .origin = EventOrigin::Undo,
     };
 }
@@ -2860,7 +2701,6 @@ CommitResult DocumentEngine::redo()
     publish(*_impl, EventKind::AfterCommit, EventOrigin::Redo, step.changeSet());
     return CommitResult {
         .changeSet = step.changeSet(),
-        .commitLog = serializeEngineCommitLog(_impl->schema, step.changeSet()),
         .origin = EventOrigin::Redo,
     };
 }
@@ -3648,7 +3488,6 @@ CommitResult Transaction::commit()
         runHooks(engine, HookStage::BeforeCommit, beforeContext, _impl->changeSet, false);
         CommitResult result {
             .changeSet = _impl->changeSet,
-            .commitLog = serializeEngineCommitLog(engine.schema, _impl->changeSet),
             .origin = _impl->origin,
         };
         if (_impl->options.undoable && createsUndoStep(_impl->changeSet)) {

@@ -255,7 +255,7 @@ TEST(DocumentEngineSmokeTest, DefinesSchemaAndExercisesBasicDocumentOperations)
         transaction.update(bobKind1, bobBar, Value(std::int64_t {9}));
         replayedUpdate = transaction.commit();
     }
-    restored.replayCommitLog(replayedUpdate.commitLog);
+    restored.replayChangeSet(ChangeSet::deserialize(replayedUpdate.changeSet.serialize()));
     EXPECT_EQ(restored.read(bobKind1, bobBar).asInt64(), 9);
 
     ASSERT_TRUE(engine.canUndo());

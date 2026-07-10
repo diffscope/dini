@@ -19,13 +19,11 @@ class DocumentEngine;
 /**
  * @brief Result of a successfully committed ordinary, undo, or redo transaction.
  *
- * CommitResult carries the public semantic change set and persistent log bytes.
- * For ordinary transactions, createdUndoStep indicates whether the committed
- * change was pushed to the undo stack.
+ * CommitResult carries the public semantic change set. For ordinary transactions,
+ * createdUndoStep indicates whether the committed change was pushed to the undo stack.
  */
 struct DINI_EXPORT CommitResult {
     ChangeSet changeSet;
-    ByteArray commitLog;
     EventOrigin origin = EventOrigin::Normal;
     bool createdUndoStep = false;
     bool clearedRedoStack = false;
@@ -190,8 +188,8 @@ private:
  * @brief RAII write transaction for a DocumentEngine instance.
  *
  * Transaction is the only public write path for ordinary updates. Updates become
- * globally readable immediately after application, while commit produces logs and
- * undo history and rollback applies inverse changes.
+ * globally readable immediately after application, while commit produces a semantic
+ * change set and undo history and rollback applies inverse changes.
  */
 class DINI_EXPORT Transaction {
 public:
@@ -370,7 +368,7 @@ public:
      * @brief Commits the active transaction.
      *
      * @pre The transaction must be active and all before-commit hooks must accept the final ChangeSet.
-     * @post The transaction is completed, persistent log bytes are produced, and undo/redo stacks are updated.
+     * @post The transaction is completed and undo/redo stacks are updated.
      * @throws TransactionError if the transaction is failed or inactive; propagates hook and constraint exceptions.
      */
     CommitResult commit();

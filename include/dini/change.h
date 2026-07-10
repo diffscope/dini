@@ -58,7 +58,7 @@ struct DINI_EXPORT ItemInsertedChange {
  * @brief Payload for a removed table row or list element.
  *
  * The snapshot contains enough public information for undo, event consumers, and
- * log serialization to understand the removed state.
+ * serialization to understand the removed state.
  */
 struct DINI_EXPORT ItemRemovedChange {
     ItemSnapshot item;
@@ -256,9 +256,9 @@ private:
 /**
  * @brief Ordered semantic description of changes produced by updates or replay.
  *
- * ChangeSet is the central event, rollback, undo, redo, and logging payload. It
+ * ChangeSet is the central event, rollback, undo, redo, and serialization payload. It
  * preserves operation order and first-class list semantics while allowing callers
- * to derive inverse and merged forms.
+ * to derive inverse, merged, and serialized forms.
  */
 class DINI_EXPORT ChangeSet {
 public:
@@ -376,13 +376,23 @@ public:
     ChangeSet invert() const;
 
     /**
-     * @brief Serializes this change set into commit-log bytes.
+     * @brief Serializes this change set into standalone bytes.
      *
-     * @pre The change set must be compatible with the active schema.
-     * @post The returned bytes can be passed to DocumentEngine::replayCommitLog for a compatible schema.
+     * @pre None; schema compatibility is the caller's responsibility.
+     * @post The returned bytes can be deserialized with ChangeSet::deserialize().
      * @throws LogError if serialization cannot represent an operation.
      */
-    ByteArray serializeForLog() const;
+    ByteArray serialize() const;
+
+    /**
+     * @brief Deserializes one standalone change set.
+     *
+     * @param bytes Bytes produced by serialize().
+     * @pre bytes are assumed to target the schema where the change set will be replayed.
+     * @post The returned change set has not been checked against any schema.
+     * @throws LogError if bytes are corrupt or use an unsupported format.
+     */
+    static ChangeSet deserialize(const ByteArray &bytes);
 
     /**
      * @brief Merges multiple change sets while preserving their operation order.
@@ -402,7 +412,7 @@ private:
  * @brief Non-persistent undo history entry for one committed transaction.
  *
  * UndoStep records the committed ChangeSet and user-facing metadata needed by
- * the current memory session. It is not included in snapshots or logs.
+ * the current memory session. It is not included in snapshots.
  */
 class DINI_EXPORT UndoStep {
 public:

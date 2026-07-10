@@ -208,7 +208,7 @@ TEST(DocumentEnginePendingSourceHookTest, PendingSourceUpdatesSurviveUndoRedoAnd
 
     DocumentEngine replay(schema.schema);
     replay.restoreSnapshot(snapshot);
-    replay.replayCommitLog(result.commitLog);
+    replay.replayChangeSet(ChangeSet::deserialize(result.changeSet.serialize()));
     EXPECT_EQ(replay.read(itemId, schema.value).asInt64(), 5);
     EXPECT_EQ(replay.read(itemId, schema.mirror).asInt64(), 10);
     EXPECT_EQ(replay.read(itemId, schema.total).asInt64(), 15);

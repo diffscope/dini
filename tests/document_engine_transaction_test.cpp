@@ -433,19 +433,19 @@ TEST(DocumentEngineTransactionTest, TransactionChangesetNotEmpty)
     EXPECT_TRUE(hasInsert);
 }
 
-TEST(DocumentEngineTransactionTest, TransactionCommitLogNotEmpty)
+TEST(DocumentEngineTransactionTest, TransactionCommitChangeSetNotEmpty)
 {
     auto s = buildItemSchema();
     DocumentEngine engine(s.schema);
 
     auto t = engine.beginTransaction();
     t.insert(s.table, {
-        ColumnValue{.column = s.name, .value = Value("logTest")},
+        ColumnValue{.column = s.name, .value = Value("changeSetTest")},
         ColumnValue{.column = s.value, .value = Value(std::int64_t{3})},
     });
     auto result = t.commit();
 
-    EXPECT_FALSE(result.commitLog.empty());
+    EXPECT_FALSE(result.changeSet.empty());
 }
 
 TEST(DocumentEngineTransactionTest, TransactionRollbackInverseChangeset)

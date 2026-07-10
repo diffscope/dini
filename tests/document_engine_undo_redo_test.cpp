@@ -468,11 +468,9 @@ TEST(DocumentEngineUndoRedoTest, UndoRedoCommitResultProduced)
 
     const CommitResult undoResult = engine.undo();
     EXPECT_FALSE(undoResult.changeSet.empty());
-    EXPECT_FALSE(undoResult.commitLog.empty());
 
     const CommitResult redoResult = engine.redo();
     EXPECT_FALSE(redoResult.changeSet.empty());
-    EXPECT_FALSE(redoResult.commitLog.empty());
 }
 
 TEST(DocumentEngineUndoRedoTest, UndoRedoWithNonUndoableBetween)

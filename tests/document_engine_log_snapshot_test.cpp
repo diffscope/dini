@@ -191,10 +191,26 @@ SeedResult seedEngine(DocumentEngine &engine, const TestSchema &s)
 }
 
 // ---------------------------------------------------------------------------
+// Test 0: SchemaStructureRoundTripsForComparison
+// ---------------------------------------------------------------------------
+
+TEST(DocumentEngineSnapshotSerializationTest, SchemaStructureRoundTripsForComparison)
+{
+    auto s = buildTestSchema();
+    auto serializedSchema = s.schema.serializeStructure();
+
+    ASSERT_FALSE(serializedSchema.empty());
+    EXPECT_TRUE(s.schema.matchesSerializedStructure(serializedSchema));
+
+    serializedSchema.back() ^= std::uint8_t {0xff};
+    EXPECT_FALSE(s.schema.matchesSerializedStructure(serializedSchema));
+}
+
+// ---------------------------------------------------------------------------
 // Test 1: SnapshotIncludesRegularColumn
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, SnapshotIncludesRegularColumn)
+TEST(DocumentEngineSnapshotSerializationTest, SnapshotIncludesRegularColumn)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);
@@ -230,7 +246,7 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotIncludesRegularColumn)
 // Test 2: SnapshotIncludesRegularTable
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, SnapshotIncludesRegularTable)
+TEST(DocumentEngineSnapshotSerializationTest, SnapshotIncludesRegularTable)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);
@@ -261,7 +277,7 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotIncludesRegularTable)
 // Test 3: SnapshotDoesNotContainUndoHistory
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, SnapshotDoesNotContainUndoHistory)
+TEST(DocumentEngineSnapshotSerializationTest, SnapshotDoesNotContainUndoHistory)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);
@@ -313,7 +329,7 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotDoesNotContainUndoHistory)
 // Test 4: RestoreThenInsertUniqueOk
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, RestoreThenInsertUniqueOk)
+TEST(DocumentEngineSnapshotSerializationTest, RestoreThenInsertUniqueOk)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);
@@ -367,10 +383,10 @@ TEST(DocumentEngineLogSnapshotTest, RestoreThenInsertUniqueOk)
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: ReplaySingleLog
+// Test 5: ReplaySingleChangeSet
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, ReplaySingleLog)
+TEST(DocumentEngineSnapshotSerializationTest, ReplaySingleChangeSet)
 {
     auto s = buildTestSchema();
     DocumentEngine engineA(s.schema);
@@ -380,15 +396,15 @@ TEST(DocumentEngineLogSnapshotTest, ReplaySingleLog)
     const auto snapshot = engineA.createSnapshot();
 
     // One more commit on engine A after the snapshot
-    ByteArray commitLog;
+    ByteArray changeSetBytes;
     {
         auto txn = engineA.beginTransaction();
         txn.update(seed.item1Id, s.itemValue, Value(std::int64_t{150}));
         auto result = txn.commit();
-        commitLog = result.commitLog;
+        changeSetBytes = result.changeSet.serialize();
     }
 
-    ASSERT_FALSE(commitLog.empty());
+    ASSERT_FALSE(changeSetBytes.empty());
 
     // Engine B starts from the snapshot
     DocumentEngine engineB(s.schema);
@@ -397,7 +413,7 @@ TEST(DocumentEngineLogSnapshotTest, ReplaySingleLog)
     // Before replay, value is still the seed value
     EXPECT_EQ(engineB.read(seed.item1Id, s.itemValue).asInt64(), 100);
 
-    engineB.replayCommitLog(commitLog);
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSetBytes));
 
     // After replay, value matches engine A's post-commit state
     EXPECT_EQ(engineB.read(seed.item1Id, s.itemValue).asInt64(), 150);
@@ -408,10 +424,10 @@ TEST(DocumentEngineLogSnapshotTest, ReplaySingleLog)
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: ReplayMultipleLogs
+// Test 6: ReplayMultipleChangeSets
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, ReplayMultipleLogs)
+TEST(DocumentEngineSnapshotSerializationTest, ReplayMultipleChangeSets)
 {
     auto s = buildTestSchema();
     DocumentEngine engineA(s.schema);
@@ -421,27 +437,27 @@ TEST(DocumentEngineLogSnapshotTest, ReplayMultipleLogs)
     const auto snapshot = engineA.createSnapshot();
 
     // Several commits after the snapshot
-    ByteArray log1, log2, log3;
+    ByteArray changeSet1, changeSet2, changeSet3;
 
     {
         auto txn = engineA.beginTransaction();
         txn.update(seed.item1Id, s.itemName, Value("AlphaPrime"));
         auto result = txn.commit();
-        log1 = result.commitLog;
+        changeSet1 = result.changeSet.serialize();
     }
 
     {
         auto txn = engineA.beginTransaction();
         txn.update(seed.item2Id, s.itemValue, Value(std::int64_t{250}));
         auto result = txn.commit();
-        log2 = result.commitLog;
+        changeSet2 = result.changeSet.serialize();
     }
 
     {
         auto txn = engineA.beginTransaction();
         txn.remove(seed.item3Id);
         auto result = txn.commit();
-        log3 = result.commitLog;
+        changeSet3 = result.changeSet.serialize();
     }
 
     // New engine starts from snapshot
@@ -449,9 +465,9 @@ TEST(DocumentEngineLogSnapshotTest, ReplayMultipleLogs)
     engineB.restoreSnapshot(snapshot);
 
     // Replay in order
-    engineB.replayCommitLog(log1);
-    engineB.replayCommitLog(log2);
-    engineB.replayCommitLog(log3);
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet1));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet2));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet3));
 
     // Final state matches engine A
     EXPECT_EQ(engineB.read(seed.item1Id, s.itemName).asString(), "AlphaPrime");
@@ -466,7 +482,7 @@ TEST(DocumentEngineLogSnapshotTest, ReplayMultipleLogs)
 // Test 7: RecoveryEngineStateEqualToOriginal
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, RecoveryEngineStateEqualToOriginal)
+TEST(DocumentEngineSnapshotSerializationTest, RecoveryEngineStateEqualToOriginal)
 {
     auto s = buildTestSchema();
     DocumentEngine engineA(s.schema);
@@ -476,13 +492,13 @@ TEST(DocumentEngineLogSnapshotTest, RecoveryEngineStateEqualToOriginal)
     const auto snapshot = engineA.createSnapshot();
 
     // More operations post-snapshot
-    ByteArray log1, log2;
+    ByteArray changeSet1, changeSet2;
 
     {
         auto txn = engineA.beginTransaction();
         txn.update(seed.item1Id, s.itemValue, Value(std::int64_t{111}));
         auto result = txn.commit();
-        log1 = result.commitLog;
+        changeSet1 = result.changeSet.serialize();
     }
 
     ItemId extraItemId = 0;
@@ -495,14 +511,14 @@ TEST(DocumentEngineLogSnapshotTest, RecoveryEngineStateEqualToOriginal)
         });
         txn.update(seed.item3Id, s.itemCode, Value("C3a"));
         auto result = txn.commit();
-        log2 = result.commitLog;
+        changeSet2 = result.changeSet.serialize();
     }
 
-    // Recover: engine B <- snapshot + all logs
+    // Recover: engine B <- snapshot + all change sets
     DocumentEngine engineB(s.schema);
     engineB.restoreSnapshot(snapshot);
-    engineB.replayCommitLog(log1);
-    engineB.replayCommitLog(log2);
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet1));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet2));
 
     // ---- Compare every item ----
     auto itemsA = engineA.view(s.itemTable).toVector();
@@ -563,10 +579,10 @@ TEST(DocumentEngineLogSnapshotTest, RecoveryEngineStateEqualToOriginal)
 }
 
 // ---------------------------------------------------------------------------
-// Test 8: ReplayWithEmptyLog
+// Test 8: ReplayWithEmptyChangeSet
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, ReplayWithEmptyLog)
+TEST(DocumentEngineSnapshotSerializationTest, ReplayWithEmptyChangeSet)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);
@@ -578,9 +594,8 @@ TEST(DocumentEngineLogSnapshotTest, ReplayWithEmptyLog)
     DocumentEngine restored(s.schema);
     restored.restoreSnapshot(snapshot);
 
-    // Replaying an empty ByteArray must succeed without changing state
-    const ByteArray emptyLog;
-    EXPECT_NO_THROW(restored.replayCommitLog(emptyLog));
+    // Replaying an empty ChangeSet must succeed without changing state
+    EXPECT_NO_THROW(restored.replayChangeSet(ChangeSet()));
 
     // State unchanged
     EXPECT_EQ(restored.view(s.itemTable).count(), 3U);
@@ -595,7 +610,7 @@ TEST(DocumentEngineLogSnapshotTest, ReplayWithEmptyLog)
 // Test 9: SnapshotPreservesListOrder
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, SnapshotPreservesListOrder)
+TEST(DocumentEngineSnapshotSerializationTest, SnapshotPreservesListOrder)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);
@@ -650,7 +665,7 @@ TEST(DocumentEngineLogSnapshotTest, SnapshotPreservesListOrder)
 // Test 10: SnapshotPreservesMultiTableState
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineLogSnapshotTest, SnapshotPreservesMultiTableState)
+TEST(DocumentEngineSnapshotSerializationTest, SnapshotPreservesMultiTableState)
 {
     auto s = buildTestSchema();
     DocumentEngine engine(s.schema);

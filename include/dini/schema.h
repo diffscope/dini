@@ -272,6 +272,25 @@ public:
     SchemaId schemaId() const;
 
     /**
+     * @brief Serializes the comparable public schema structure.
+     *
+     * @pre isValid() must be true.
+     * @post The returned bytes describe the same schema fields that participate in schema compatibility checks.
+     * @throws SchemaError if the wrapper is invalid.
+     */
+    ByteArray serializeStructure() const;
+
+    /**
+     * @brief Compares serialized schema structure bytes with this schema.
+     *
+     * @param bytes Bytes produced by serializeStructure().
+     * @pre isValid() must be true.
+     * @post Returns true only when bytes exactly match this schema's comparable structure.
+     * @throws SchemaError if the wrapper is invalid.
+     */
+    bool matchesSerializedStructure(const ByteArray &bytes) const;
+
+    /**
      * @brief Returns metadata for a table handle.
      *
      * @param table Table handle to inspect.

@@ -24,7 +24,7 @@ namespace dini {
  * @brief In-memory document storage engine instance for one document.
  *
  * DocumentEngine owns runtime document state, indexes, transactions, event
- * subscriptions, undo/redo stacks, ID generation state, and snapshot/log
+ * subscriptions, undo/redo stacks, ID generation state, and snapshot
  * serialization for one document. It does not own files, fsync policy, UI
  * bindings, multi-process access, or thread-level synchronization.
  */
@@ -218,14 +218,14 @@ public:
     void restoreSnapshot(const ByteArray &snapshot);
 
     /**
-     * @brief Replays one persistent commit log after a compatible snapshot.
+     * @brief Replays one change set against the current document state.
      *
-     * @param commitLog Commit log bytes produced by a compatible engine schema.
-     * @pre commitLog must be ordered after the current restored snapshot state.
-     * @post Document state is advanced and undo/redo history remains empty.
-     * @throws RecoveryError if replay fails because of corruption, schema mismatch, or ID conflict.
+     * @param changeSet Change set produced for this engine schema.
+     * @pre changeSet must be ordered after the current state and compatible with this engine schema.
+     * @post Document state is advanced and undo/redo history remains unchanged.
+     * @throws RecoveryError if replay fails because of invalid operations, constraints, or ID conflict.
      */
-    void replayCommitLog(const ByteArray &commitLog);
+    void replayChangeSet(const ChangeSet &changeSet);
 
     /**
      * @brief Tests whether an undo step is currently available.
@@ -247,7 +247,7 @@ public:
      * @brief Executes one undo special transaction.
      *
      * @pre No write transaction may be active and canUndo() should be true.
-     * @post The target UndoStep is moved to the redo stack, document state is reverted, and commit log bytes are produced.
+     * @post The target UndoStep is moved to the redo stack and document state is reverted.
      * @throws TransactionError if no undo step exists or a write transaction is active; propagates after-hook exceptions after state changes.
      */
     CommitResult undo();
@@ -256,7 +256,7 @@ public:
      * @brief Executes one redo special transaction.
      *
      * @pre No write transaction may be active and canRedo() should be true.
-     * @post The target UndoStep is moved to the undo stack, document state is reapplied, and commit log bytes are produced.
+     * @post The target UndoStep is moved to the undo stack and document state is reapplied.
      * @throws TransactionError if no redo step exists or a write transaction is active; propagates after-hook exceptions after state changes.
      */
     CommitResult redo();
@@ -265,7 +265,7 @@ public:
      * @brief Clears the current in-memory undo and redo stacks.
      *
      * @pre None.
-     * @post Document data is unchanged, no commit log is generated, and no hooks or events are triggered.
+     * @post Document data is unchanged and no hooks or events are triggered.
      */
     void clearUndoHistory();
 

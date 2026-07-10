@@ -452,10 +452,10 @@ TEST(DocumentEngineComputedColumnTest, ComputedColumnSnapshotRecovery)
 }
 
 // ---------------------------------------------------------------------------
-// ComputedColumnLogReplay
+// ComputedColumnChangeSetReplay
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEngineComputedColumnTest, ComputedColumnLogReplay)
+TEST(DocumentEngineComputedColumnTest, ComputedColumnChangeSetReplay)
 {
     SchemaBuilder builder;
     auto itemTable = builder.createTable("Item");
@@ -502,20 +502,20 @@ TEST(DocumentEngineComputedColumnTest, ComputedColumnLogReplay)
 
     const auto snapshot = engineA.createSnapshot();
 
-    ByteArray commitLog;
+    ByteArray changeSetBytes;
     {
         auto txn = engineA.beginTransaction();
         txn.update(itemId, a, Value(std::int64_t{5}));
         auto result = txn.commit();
-        commitLog = result.commitLog;
+        changeSetBytes = result.changeSet.serialize();
     }
 
-    ASSERT_FALSE(commitLog.empty());
+    ASSERT_FALSE(changeSetBytes.empty());
 
     // --- Act: engine B recovers from snapshot + replay ---
     DocumentEngine engineB(schema);
     engineB.restoreSnapshot(snapshot);
-    engineB.replayCommitLog(commitLog);
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSetBytes));
 
     // --- Assert: computed column values match engine A ---
     EXPECT_EQ(engineB.read(itemId, a).asInt64(), 5);

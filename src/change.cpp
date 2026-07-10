@@ -207,9 +207,14 @@ ChangeSet ChangeSet::invert() const
     return ChangeSet(std::move(invertedOperations));
 }
 
-ByteArray ChangeSet::serializeForLog() const
+ByteArray ChangeSet::serialize() const
 {
-    return serializeChangeSetForLog(*this);
+    return serializeChangeSet(*this);
+}
+
+ChangeSet ChangeSet::deserialize(const ByteArray &bytes)
+{
+    return deserializeChangeSet(bytes);
 }
 
 ChangeSet ChangeSet::merge(const std::vector<ChangeSet> &changes)

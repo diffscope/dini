@@ -118,15 +118,15 @@ public:
 };
 
 /**
- * @brief Reports commit log serialization or replay failures.
+ * @brief Reports change set serialization or deserialization failures.
  */
 class DINI_EXPORT LogError : public DiniError {
 public:
     /**
-     * @brief Creates a log error.
+     * @brief Creates a serialization error.
      *
-     * @param message Human-readable log failure description.
-     * @pre message should identify the invalid log operation or bytes.
+     * @param message Human-readable serialization failure description.
+     * @pre message should identify the invalid change set operation or bytes.
      * @post The exception is classified as LogError.
      */
     explicit LogError(const std::string &message);

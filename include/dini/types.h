@@ -15,14 +15,14 @@ namespace dini {
  * @brief Globally unique item identifier inside one document engine instance.
  *
  * ItemId is used for rows, list elements, parent references, change records, and
- * log records. Implementations must generate values automatically and must not
+ * serialized change sets. Implementations must generate values automatically and must not
  * reuse an identifier that may have been observed during the lifetime of an
  * engine instance.
  */
 using ItemId = std::uint64_t;
 
 /**
- * @brief Binary byte sequence used for snapshots, commit logs, and binary values.
+ * @brief Binary byte sequence used for snapshots, schema structures, change sets, and binary values.
  *
  * ByteArray has no filesystem semantics. The caller owns storage and ordering of
  * byte streams produced by the engine.
@@ -41,7 +41,7 @@ using SchemaId = std::uint64_t;
  * @brief Stable container identity token within one schema.
  *
  * A ContainerId identifies a table or list definition. It is intended for handle
- * validation and logging, not for user-facing persistence outside engine data.
+ * validation and serialization, not for user-facing persistence outside engine data.
  */
 using ContainerId = std::uint32_t;
 
@@ -218,8 +218,7 @@ enum class ChangeOperationKind {
  * @brief Options used when opening a write transaction.
  *
  * The default contract is undoable=true. A non-undoable transaction still commits
- * normally and still produces persistent log bytes, but it does not create an
- * UndoStep after commit.
+ * normally, but it does not create an UndoStep after commit.
  */
 struct DINI_EXPORT TransactionOptions {
     bool undoable = true;
@@ -254,7 +253,7 @@ struct DINI_EXPORT ListRotation {
 /**
  * @brief Diagnostic metadata shared by schema objects and handles.
  *
- * Names are optional and are not runtime identifiers. Querying, updating, logging,
+ * Names are optional and are not runtime identifiers. Querying, updating, serialization,
  * and recovery must use handles and stable numeric identities instead.
  */
 struct DINI_EXPORT DiagnosticInfo {
