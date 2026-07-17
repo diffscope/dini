@@ -2668,8 +2668,9 @@ CommitResult DocumentEngine::undo()
     TransactionContext context(std::move(data));
     runHooks(*_impl, HookStage::AfterApply, context, inverse, false);
     publish(*_impl, EventKind::AfterApply, EventOrigin::Undo, inverse);
-    runHooks(*_impl, HookStage::AfterCommit, context, inverse, false);
-    publish(*_impl, EventKind::AfterCommit, EventOrigin::Undo, inverse);
+    const auto committedChanges = ChangeSet::merge({inverse});
+    runHooks(*_impl, HookStage::AfterCommit, context, committedChanges, false);
+    publish(*_impl, EventKind::AfterCommit, EventOrigin::Undo, committedChanges);
     return CommitResult {
         .changeSet = inverse,
         .origin = EventOrigin::Undo,
@@ -2697,8 +2698,9 @@ CommitResult DocumentEngine::redo()
     TransactionContext context(std::move(data));
     runHooks(*_impl, HookStage::AfterApply, context, step.changeSet(), false);
     publish(*_impl, EventKind::AfterApply, EventOrigin::Redo, step.changeSet());
-    runHooks(*_impl, HookStage::AfterCommit, context, step.changeSet(), false);
-    publish(*_impl, EventKind::AfterCommit, EventOrigin::Redo, step.changeSet());
+    const auto committedChanges = ChangeSet::merge({step.changeSet()});
+    runHooks(*_impl, HookStage::AfterCommit, context, committedChanges, false);
+    publish(*_impl, EventKind::AfterCommit, EventOrigin::Redo, committedChanges);
     return CommitResult {
         .changeSet = step.changeSet(),
         .origin = EventOrigin::Redo,
@@ -3501,8 +3503,9 @@ CommitResult Transaction::commit()
         _impl->state = TransactionState::Committed;
         engine.activeTransaction = false;
         auto afterContext = makeContext();
-        runHooks(engine, HookStage::AfterCommit, afterContext, _impl->changeSet, false);
-        publish(engine, EventKind::AfterCommit, _impl->origin, _impl->changeSet);
+        const auto committedChanges = ChangeSet::merge({_impl->changeSet});
+        runHooks(engine, HookStage::AfterCommit, afterContext, committedChanges, false);
+        publish(engine, EventKind::AfterCommit, _impl->origin, committedChanges);
         return result;
     } catch (...) {
         markFailed(*_impl);

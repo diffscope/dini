@@ -395,11 +395,15 @@ public:
     static ChangeSet deserialize(const ByteArray &bytes);
 
     /**
-     * @brief Merges multiple change sets while preserving their operation order.
+     * @brief Merges multiple change sets into their final semantic change stream.
      *
-     * @param changes Change sets to concatenate.
+     * Repeated updates to the same item and column are folded into one operation:
+     * the first old value and final new value are retained. Other semantic operations
+     * preserve their original order, and derived links are remapped to the merged stream.
+     *
+     * @param changes Change sets to merge.
      * @pre changes must be supplied in semantic application order.
-     * @post The returned ChangeSet contains all operations and adjusted derived links.
+     * @post The returned ChangeSet contains the merged operations and adjusted derived links.
      */
     static ChangeSet merge(const std::vector<ChangeSet> &changes);
 

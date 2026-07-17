@@ -1,6 +1,9 @@
 #include "change_p.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <iterator>
+#include <set>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -219,19 +222,89 @@ ChangeSet ChangeSet::deserialize(const ByteArray &bytes)
 
 ChangeSet ChangeSet::merge(const std::vector<ChangeSet> &changes)
 {
-    ChangeSet merged;
+    std::vector<ChangeOperation> flattenedOperations;
+    std::vector<DerivedChangeLink> flattenedLinks;
 
     for (const auto &changeSet : changes) {
-        const auto operationOffset = merged.operations().size();
+        const auto operationOffset = flattenedOperations.size();
 
         for (const auto &operation : changeSet.operations()) {
-            merged.append(operation);
+            flattenedOperations.push_back(operation);
         }
 
         for (const auto &link : changeSet.derivedLinks()) {
-            merged.addDerivedLink(DerivedChangeLink {
+            flattenedLinks.push_back(DerivedChangeLink {
                 .sourceOperation = operationOffset + link.sourceOperation,
                 .derivedOperation = operationOffset + link.derivedOperation,
+            });
+        }
+    }
+
+    std::vector<ChangeOperation> mergedOperations;
+    std::vector<std::size_t> mergedIndexBySource(flattenedOperations.size());
+
+    for (std::size_t sourceIndex = 0; sourceIndex < flattenedOperations.size(); ++sourceIndex) {
+        const auto &operation = flattenedOperations[sourceIndex];
+        auto mergedOperation = mergedOperations.end();
+
+        if (const auto *change = std::get_if<ColumnUpdatedChange>(&operation.payload())) {
+            mergedOperation = std::find_if(mergedOperations.begin(), mergedOperations.end(), [change](const auto &candidate) {
+                const auto *existing = std::get_if<ColumnUpdatedChange>(&candidate.payload());
+                return existing && existing->itemId == change->itemId && existing->column == change->column;
+            });
+
+            if (mergedOperation != mergedOperations.end()) {
+                const auto existing = std::get<ColumnUpdatedChange>(mergedOperation->payload());
+                *mergedOperation = ChangeOperation(ChangeOperation::Payload {ColumnUpdatedChange {
+                    .itemId = change->itemId,
+                    .column = change->column,
+                    .oldValue = existing.oldValue,
+                    .newValue = change->newValue,
+                    .associationOptions = change->associationOptions,
+                    .oldListIndex = existing.oldListIndex,
+                }});
+            }
+        } else if (const auto *change = std::get_if<ComputedColumnUpdatedChange>(&operation.payload())) {
+            mergedOperation = std::find_if(mergedOperations.begin(), mergedOperations.end(), [change](const auto &candidate) {
+                const auto *existing = std::get_if<ComputedColumnUpdatedChange>(&candidate.payload());
+                return existing && existing->itemId == change->itemId && existing->column == change->column;
+            });
+
+            if (mergedOperation != mergedOperations.end()) {
+                const auto existing = std::get<ComputedColumnUpdatedChange>(mergedOperation->payload());
+                *mergedOperation = ChangeOperation(ChangeOperation::Payload {ComputedColumnUpdatedChange {
+                    .itemId = change->itemId,
+                    .column = change->column,
+                    .oldValue = existing.oldValue,
+                    .newValue = change->newValue,
+                }});
+            }
+        }
+
+        if (mergedOperation == mergedOperations.end()) {
+            mergedOperations.push_back(operation);
+            mergedIndexBySource[sourceIndex] = mergedOperations.size() - 1;
+        } else {
+            mergedIndexBySource[sourceIndex] = static_cast<std::size_t>(
+                std::distance(mergedOperations.begin(), mergedOperation));
+        }
+    }
+
+    ChangeSet merged;
+    for (const auto &operation : mergedOperations) {
+        merged.append(operation);
+    }
+
+    std::set<std::pair<std::size_t, std::size_t>> addedLinks;
+    for (const auto &link : flattenedLinks) {
+        const auto mergedLink = std::pair {
+            mergedIndexBySource[link.sourceOperation],
+            mergedIndexBySource[link.derivedOperation],
+        };
+        if (addedLinks.insert(mergedLink).second) {
+            merged.addDerivedLink(DerivedChangeLink {
+                .sourceOperation = mergedLink.first,
+                .derivedOperation = mergedLink.second,
             });
         }
     }

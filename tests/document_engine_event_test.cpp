@@ -114,6 +114,33 @@ TEST(DocumentEngineEventTest, EventAfterCommitOnCommit)
     EXPECT_TRUE(sawAfterCommit);
 }
 
+TEST(DocumentEngineEventTest, EventAfterCommitMergesRepeatedColumnUpdates)
+{
+    auto s = buildEventSchema();
+    DocumentEngine engine(s.schema);
+    const auto itemId = seedEventEngine(engine, s);
+
+    std::vector<EngineEvent> events;
+    auto sub = engine.subscribe([&events](const EngineEvent &e) {
+        if (e.kind == EventKind::AfterCommit) events.push_back(e);
+    });
+
+    auto txn = engine.beginTransaction();
+    txn.update(itemId, s.itemName, Value("first"));
+    txn.update(itemId, s.itemName, Value("committed"));
+    txn.commit();
+
+    ASSERT_EQ(events.size(), 1U);
+    const auto &operations = events.front().changeSet.operations();
+    ASSERT_EQ(operations.size(), 1U);
+    ASSERT_EQ(operations.front().kind(), ChangeOperationKind::ColumnUpdated);
+    const auto &change = std::get<ColumnUpdatedChange>(operations.front().payload());
+    EXPECT_EQ(change.itemId, itemId);
+    EXPECT_EQ(change.column, s.itemName);
+    EXPECT_EQ(change.oldValue.asString(), "alpha");
+    EXPECT_EQ(change.newValue.asString(), "committed");
+}
+
 TEST(DocumentEngineEventTest, EventRollbackOnRollback)
 {
     auto s = buildEventSchema();
