@@ -1314,12 +1314,16 @@ namespace dini {
         }
 
         bool hasInsert = false;
+        bool hasListInsert = false;
         bool hasOnlyInsertInitialization = true;
         for (const auto &operation : changeSet.operations()) {
             switch (operation.kind()) {
                 case ChangeOperationKind::ItemInserted:
+                    hasInsert = true;
+                    break;
                 case ChangeOperationKind::ListInserted:
                     hasInsert = true;
+                    hasListInsert = true;
                     break;
                 case ChangeOperationKind::ComputedColumnUpdated:
                     break;
@@ -1329,7 +1333,9 @@ namespace dini {
             }
         }
 
-        if (hasInsert && hasOnlyInsertInitialization) {
+        // Multiple table rows can be the internal initialization of one logical object,
+        // but list rows are independently editable document data and must remain undoable.
+        if (hasInsert && hasOnlyInsertInitialization && !hasListInsert) {
             return changeSet.operations().size() == 1;
         }
         return true;
