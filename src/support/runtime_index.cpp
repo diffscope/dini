@@ -1,6 +1,7 @@
 #include "runtime_index.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -42,6 +43,27 @@ bool aggregateEnabled(const AggregateIndexOptions &options) noexcept
 
 std::string stableValueKey(const Value &value)
 {
+    auto integerKey = [type = value.type()](auto payload) {
+        char buffer[64];
+        auto *cursor = buffer;
+        auto *const end = buffer + sizeof(buffer);
+        cursor = std::to_chars(cursor, end, static_cast<int>(type)).ptr;
+        *cursor++ = ':';
+        cursor = std::to_chars(cursor, end, payload).ptr;
+        return std::string(buffer, cursor);
+        };
+        switch (value.type()) {
+            case ValueType::Null:
+                return std::to_string(static_cast<int>(value.type())) + ":null";
+            case ValueType::Bool:
+                return std::to_string(static_cast<int>(value.type())) + (value.asBool() ? ":1" : ":0");
+        case ValueType::Int64:
+            return integerKey(value.asInt64());
+        case ValueType::UInt64:
+            return integerKey(value.asUInt64());
+        default:
+            break;
+    }
     std::ostringstream stream;
     stream << static_cast<int>(value.type()) << ':';
     std::visit(
@@ -108,6 +130,75 @@ bool comparePredicate(const Value &lhs, ComparisonOperator op, const Value &rhs)
             return comparison <= 0;
     }
     return false;
+}
+
+RuntimeItemIdSet queryItemIds(const RuntimeItemIdSet &items, ComparisonOperator op, const Value &value)
+{
+    RuntimeItemIdSet result;
+    if (value.type() != ValueType::UInt64) {
+        for (const auto id : items) {
+            if (comparePredicate(Value(static_cast<std::uint64_t>(id)), op, value)) {
+                result.insert(result.end(), id);
+            }
+        }
+        return result;
+    }
+
+    const auto id = static_cast<ItemId>(value.asUInt64());
+    const auto lower = items.lower_bound(id);
+    const auto upper = items.upper_bound(id);
+    switch (op) {
+        case ComparisonOperator::Equal:
+            if (lower != items.end() && *lower == id) {
+                result.insert(id);
+            }
+            break;
+        case ComparisonOperator::NotEqual:
+            result.insert(items.begin(), lower);
+            result.insert(upper, items.end());
+            break;
+        case ComparisonOperator::Greater:
+            result.insert(upper, items.end());
+            break;
+        case ComparisonOperator::Less:
+            result.insert(items.begin(), lower);
+            break;
+        case ComparisonOperator::GreaterOrEqual:
+            result.insert(lower, items.end());
+            break;
+        case ComparisonOperator::LessOrEqual:
+            result.insert(items.begin(), upper);
+            break;
+    }
+    return result;
+}
+
+std::size_t countItemIds(const RuntimeItemIdSet &items, ComparisonOperator op, const Value &value)
+{
+    if (value.type() != ValueType::UInt64) {
+        return static_cast<std::size_t>(std::count_if(items.begin(), items.end(), [&](ItemId id) {
+            return comparePredicate(Value(static_cast<std::uint64_t>(id)), op, value);
+        }));
+    }
+
+    const auto id = static_cast<ItemId>(value.asUInt64());
+    const auto lower = items.lower_bound(id);
+    const auto upper = items.upper_bound(id);
+    switch (op) {
+        case ComparisonOperator::Equal:
+            return lower != items.end() && *lower == id ? 1 : 0;
+        case ComparisonOperator::NotEqual:
+            return items.size() - (lower != items.end() && *lower == id ? 1 : 0);
+        case ComparisonOperator::Greater:
+            return static_cast<std::size_t>(std::distance(upper, items.end()));
+        case ComparisonOperator::Less:
+            return static_cast<std::size_t>(std::distance(items.begin(), lower));
+        case ComparisonOperator::GreaterOrEqual:
+            return static_cast<std::size_t>(std::distance(lower, items.end()));
+        case ComparisonOperator::LessOrEqual:
+            return static_cast<std::size_t>(std::distance(items.begin(), upper));
+    }
+    return 0;
 }
 
 double numericValue(const Value &value)
@@ -412,7 +503,8 @@ bool operator==(const ComparableValueKey &lhs, const ComparableValueKey &rhs)
 
 void ScalarValueIndex::add(const Value &value, ItemId id)
 {
-    _buckets[ComparableValueKey(value)].insert(id);
+    auto bucket = _buckets.emplace_hint(_buckets.end(), ComparableValueKey(value), RuntimeItemIdSet {});
+    bucket->second.insert(bucket->second.end(), id);
 }
 
 void ScalarValueIndex::remove(const Value &value, ItemId id)
@@ -1217,18 +1309,19 @@ void RuntimeIndexStore::clear()
 
 void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, const ItemSnapshot &snapshot)
 {
-    _containerItems[snapshot.containerId].insert(snapshot.id);
+    auto &containerItems = _containerItems[snapshot.containerId];
+    containerItems.insert(containerItems.end(), snapshot.id);
     std::map<RuntimeIndexedFieldKey, Value> rangeValues;
     std::set<ColumnId> rangeColumnIds;
     auto addValue = [&](RuntimeIndexedFieldKey field, const Value &value) {
         _scalarIndexes[field].add(value, snapshot.id);
     };
 
-    addValue(runtimeIdField(snapshot.containerId), Value(static_cast<std::uint64_t>(snapshot.id)));
-    addValue(runtimeVariantField(snapshot.containerId),
-             snapshot.variant ? Value(static_cast<std::uint64_t>(snapshot.variant->variantId())) : Value::null());
-
     const auto *container = findContainer(schemaDefinition, snapshot.containerId);
+    if (!container || !container->variants.empty()) {
+        addValue(runtimeVariantField(snapshot.containerId),
+                 snapshot.variant ? Value(static_cast<std::uint64_t>(snapshot.variant->variantId())) : Value::null());
+    }
     if (!container) {
         return;
     }
@@ -1301,11 +1394,11 @@ void RuntimeIndexStore::removeItem(const SchemaDefinitionData &schemaDefinition,
         }
     };
 
-    removeValue(runtimeIdField(snapshot.containerId), Value(static_cast<std::uint64_t>(snapshot.id)));
-    removeValue(runtimeVariantField(snapshot.containerId),
-                snapshot.variant ? Value(static_cast<std::uint64_t>(snapshot.variant->variantId())) : Value::null());
-
     const auto *container = findContainer(schemaDefinition, snapshot.containerId);
+    if (!container || !container->variants.empty()) {
+        removeValue(runtimeVariantField(snapshot.containerId),
+                    snapshot.variant ? Value(static_cast<std::uint64_t>(snapshot.variant->variantId())) : Value::null());
+    }
     if (container) {
         for (const auto &orderedIndex : container->orderedIndexes) {
             auto indexIt = _orderedIndexes.find({snapshot.containerId, orderedIndex.handle.indexId()});
@@ -1408,8 +1501,15 @@ RuntimeItemIdSet RuntimeIndexStore::queryField(const RuntimeIndexedFieldKey &fie
                                                ComparisonOperator op,
                                                const Value &value) const
 {
+    if (field.kind == RuntimeIndexedFieldKind::Id) {
+        return queryItemIds(containerItems(field.containerId), op, value);
+    }
     auto it = _scalarIndexes.find(field);
     if (it == _scalarIndexes.end()) {
+        if (field.kind == RuntimeIndexedFieldKind::Variant &&
+            comparePredicate(Value::null(), op, value)) {
+            return containerItems(field.containerId);
+        }
         return {};
     }
     return it->second.query(op, value);
@@ -1437,8 +1537,32 @@ void RuntimeIndexStore::orderedField(const RuntimeIndexedFieldKey &field,
                                      bool descending,
                                      const std::function<bool(ItemId)> &visitor) const
 {
+    if (field.kind == RuntimeIndexedFieldKind::Id) {
+        const auto &items = containerItems(field.containerId);
+        if (descending) {
+            for (auto it = items.rbegin(); it != items.rend(); ++it) {
+                if (!visitor(*it)) {
+                    return;
+                }
+            }
+        } else {
+            for (const auto id : items) {
+                if (!visitor(id)) {
+                    return;
+                }
+            }
+        }
+        return;
+    }
     auto it = _scalarIndexes.find(field);
     if (it == _scalarIndexes.end()) {
+        if (field.kind == RuntimeIndexedFieldKind::Variant) {
+            for (const auto id : containerItems(field.containerId)) {
+                if (!visitor(id)) {
+                    return;
+                }
+            }
+        }
         return;
     }
     it->second.ordered(visitor, descending);
@@ -1493,8 +1617,18 @@ std::size_t RuntimeIndexStore::countField(const RuntimeIndexedFieldKey &field,
                                           ComparisonOperator op,
                                           const Value &value) const
 {
+    if (field.kind == RuntimeIndexedFieldKind::Id) {
+        return countItemIds(containerItems(field.containerId), op, value);
+    }
     auto it = _scalarIndexes.find(field);
-    return it == _scalarIndexes.end() ? 0 : it->second.count(op, value);
+    if (it != _scalarIndexes.end()) {
+        return it->second.count(op, value);
+    }
+    if (field.kind == RuntimeIndexedFieldKind::Variant &&
+        comparePredicate(Value::null(), op, value)) {
+        return containerItems(field.containerId).size();
+    }
+    return 0;
 }
 
 std::size_t RuntimeIndexStore::countParent(ContainerId containerId,

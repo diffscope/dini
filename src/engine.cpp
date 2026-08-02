@@ -1,6 +1,8 @@
 #include "engine_p.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -28,6 +30,27 @@ namespace dini {
 
     std::string valueKey(const Value &value)
     {
+        auto integerKey = [type = value.type()](auto payload) {
+            char buffer[64];
+            auto *cursor = buffer;
+            auto *const end = buffer + sizeof(buffer);
+            cursor = std::to_chars(cursor, end, static_cast<int>(type)).ptr;
+            *cursor++ = ':';
+            cursor = std::to_chars(cursor, end, payload).ptr;
+            return std::string(buffer, cursor);
+        };
+        switch (value.type()) {
+            case ValueType::Null:
+                return std::to_string(static_cast<int>(value.type())) + ":null";
+            case ValueType::Bool:
+                return std::to_string(static_cast<int>(value.type())) + (value.asBool() ? ":true" : ":false");
+            case ValueType::Int64:
+                return integerKey(value.asInt64());
+            case ValueType::UInt64:
+                return integerKey(value.asUInt64());
+            default:
+                break;
+        }
         std::ostringstream stream;
         stream << static_cast<int>(value.type()) << ':';
         std::visit(
@@ -615,17 +638,29 @@ namespace dini {
 
     void ensureNoCycle(const DocumentEngine::Impl &engine, ItemId itemId, std::optional<ItemId> parentId)
     {
-        std::set<ItemId> seen;
-        while (parentId) {
-            if (*parentId == itemId || seen.find(*parentId) != seen.end()) {
-                throw ConstraintError("parent relation would create a cycle");
-            }
-            seen.insert(*parentId);
-            auto it = engine.items.find(*parentId);
+        auto parentFor = [&](ItemId id) -> std::optional<ItemId> {
+            const auto it = engine.items.find(id);
             if (it == engine.items.end()) {
                 throw ConstraintError("parent item does not exist");
             }
-            parentId = it->second.snapshot.parentId;
+            return it->second.snapshot.parentId;
+        };
+        auto slow = parentId;
+        auto fast = parentId;
+        while (slow) {
+            if (*slow == itemId) {
+                throw ConstraintError("parent relation would create a cycle");
+            }
+            slow = parentFor(*slow);
+            for (int i = 0; i < 2 && fast; ++i) {
+                if (*fast == itemId) {
+                    throw ConstraintError("parent relation would create a cycle");
+                }
+                fast = parentFor(*fast);
+            }
+            if (slow && fast && *slow == *fast) {
+                throw ConstraintError("parent relation would create a cycle");
+            }
         }
     }
 
@@ -1201,13 +1236,30 @@ namespace dini {
         engine.items.erase(snapshot.id);
     }
 
-    void eraseSnapshots(DocumentEngine::Impl &engine, const std::vector<ItemSnapshot> &snapshots)
+    const ItemSnapshot &snapshotReference(const ItemSnapshot &snapshot)
     {
-        std::unordered_set<ItemId> removedItemIds;
-        removedItemIds.reserve(snapshots.size());
-        for (const auto &snapshot : snapshots) {
-            removedItemIds.insert(snapshot.id);
+        return snapshot;
+    }
+
+    const ItemSnapshot &snapshotReference(const ItemSnapshot *snapshot)
+    {
+        return *snapshot;
+    }
+
+    template <typename SnapshotRange>
+    void eraseSnapshots(DocumentEngine::Impl &engine,
+                        const SnapshotRange &snapshots,
+                        const std::unordered_set<ItemId> *knownRemovedItemIds = nullptr)
+    {
+        std::unordered_set<ItemId> collectedItemIds;
+        if (!knownRemovedItemIds) {
+            collectedItemIds.reserve(snapshots.size());
+            for (const auto &entry : snapshots) {
+                const auto &snapshot = snapshotReference(entry);
+                collectedItemIds.insert(snapshot.id);
+            }
         }
+        const auto &removedItemIds = knownRemovedItemIds ? *knownRemovedItemIds : collectedItemIds;
 
         std::unique_ptr<RuntimeIndexStore> replacementIndexes;
         if (removedItemIds.size() > engine.items.size() / 2) {
@@ -1218,7 +1270,8 @@ namespace dini {
                 }
             }
         } else {
-            for (const auto &snapshot : snapshots) {
+            for (const auto &entry : snapshots) {
+                const auto &snapshot = snapshotReference(entry);
                 removeItemFromIndexes(engine, snapshot);
             }
         }
@@ -1239,12 +1292,372 @@ namespace dini {
             }
         }
 
-        for (const auto &snapshot : snapshots) {
+        for (const auto &entry : snapshots) {
+            const auto &snapshot = snapshotReference(entry);
             engine.items.erase(snapshot.id);
         }
         if (replacementIndexes) {
             engine.indexes = std::move(*replacementIndexes);
         }
+    }
+
+    template <typename SnapshotRange>
+    std::unordered_set<ItemId> recordRollbackForSnapshotsRemove(Transaction::Impl &transaction,
+                                                                const SnapshotRange &snapshots)
+    {
+        std::unordered_set<ItemId> removedItemIds;
+        removedItemIds.reserve(snapshots.size());
+        for (const auto &entry : snapshots) {
+            const auto &snapshot = snapshotReference(entry);
+            removedItemIds.insert(snapshot.id);
+            recordRollbackItem(transaction, snapshot.id);
+        }
+
+        for (const auto &[key, group] : transaction.engine->listGroups) {
+            const auto affected = std::any_of(group.begin(), group.end(), [&](ItemId id) {
+                return removedItemIds.find(id) != removedItemIds.end();
+            });
+            if (affected && transaction.rollbackListGroups.find(key) == transaction.rollbackListGroups.end()) {
+                transaction.rollbackListGroups.emplace(key, group);
+            }
+        }
+        return removedItemIds;
+    }
+
+    class FreeListSlotIndex {
+    public:
+        explicit FreeListSlotIndex(std::size_t size) : _tree(size + 1)
+        {
+            for (std::size_t i = 1; i < _tree.size(); ++i) {
+                _tree[i] = i & (~i + 1);
+            }
+        }
+
+        std::size_t take(std::size_t order)
+        {
+            std::size_t index = 0;
+            std::size_t step = 1;
+            while ((step << 1) < _tree.size()) {
+                step <<= 1;
+            }
+            for (; step > 0; step >>= 1) {
+                const auto next = index + step;
+                if (next < _tree.size() && _tree[next] < order) {
+                    index = next;
+                    order -= _tree[next];
+                }
+            }
+            for (auto i = index + 1; i < _tree.size(); i += i & (~i + 1)) {
+                --_tree[i];
+            }
+            return index;
+        }
+
+    private:
+        std::vector<std::size_t> _tree;
+    };
+
+    struct PlannedListGroup {
+        std::pair<ContainerId, std::string> key;
+        std::vector<ItemId> items;
+    };
+
+    bool planInsertedListGroups(const DocumentEngine::Impl &engine,
+                                const std::vector<ItemSnapshot> &snapshots,
+                                std::vector<PlannedListGroup> &plans)
+    {
+        std::map<std::pair<ContainerId, std::string>, std::vector<const ItemSnapshot *>> insertsByGroup;
+        for (const auto &snapshot : snapshots) {
+            if (!participatesInListGroup(snapshot)) {
+                continue;
+            }
+            insertsByGroup[{snapshot.containerId, valueKey(*snapshot.listAssociationValue)}].push_back(&snapshot);
+        }
+
+        plans.clear();
+        plans.reserve(insertsByGroup.size());
+        for (const auto &[key, inserts] : insertsByGroup) {
+            const auto existingIt = engine.listGroups.find(key);
+            const std::vector<ItemId> empty;
+            const auto &existing = existingIt == engine.listGroups.end() ? empty : existingIt->second;
+            const auto finalSize = existing.size() + inserts.size();
+            std::vector<const ItemSnapshot *> tailInsertions(inserts.size(), nullptr);
+            bool insertsContiguousTail = true;
+            for (const auto *snapshot : inserts) {
+                if (!snapshot->listIndex || *snapshot->listIndex < existing.size() || *snapshot->listIndex >= finalSize) {
+                    insertsContiguousTail = false;
+                    break;
+                }
+                auto &position = tailInsertions[*snapshot->listIndex - existing.size()];
+                if (position) {
+                    insertsContiguousTail = false;
+                    break;
+                }
+                position = snapshot;
+            }
+            if (insertsContiguousTail) {
+                std::vector<ItemId> result;
+                result.reserve(finalSize);
+                result.insert(result.end(), existing.begin(), existing.end());
+                for (const auto *snapshot : tailInsertions) {
+                    result.push_back(snapshot->id);
+                }
+                plans.push_back(PlannedListGroup {.key = key, .items = std::move(result)});
+                continue;
+            }
+
+            std::map<std::size_t, std::vector<std::size_t>> waitingByIndex;
+            for (std::size_t i = 0; i < inserts.size(); ++i) {
+                waitingByIndex[inserts[i]->listIndex.value_or(0)].push_back(i);
+            }
+
+            std::set<std::size_t> readyPositions;
+            std::vector<std::pair<const ItemSnapshot *, std::size_t>> insertionOrder;
+            insertionOrder.reserve(inserts.size());
+            auto currentSize = existing.size();
+            std::size_t cursor = 0;
+            auto makeReady = [&]() {
+                while (!waitingByIndex.empty() && waitingByIndex.begin()->first <= currentSize) {
+                    for (const auto position : waitingByIndex.begin()->second) {
+                        readyPositions.insert(position);
+                    }
+                    waitingByIndex.erase(waitingByIndex.begin());
+                }
+            };
+            makeReady();
+            while (insertionOrder.size() < inserts.size()) {
+                if (readyPositions.empty()) {
+                    return false;
+                }
+                auto ready = readyPositions.lower_bound(cursor);
+                if (ready == readyPositions.end()) {
+                    ready = readyPositions.begin();
+                }
+                const auto position = *ready;
+                readyPositions.erase(ready);
+                const auto requestedIndex = inserts[position]->listIndex.value_or(currentSize);
+                insertionOrder.emplace_back(inserts[position], requestedIndex);
+                ++currentSize;
+                cursor = position + 1;
+                if (cursor == inserts.size()) {
+                    cursor = 0;
+                }
+                makeReady();
+            }
+
+            FreeListSlotIndex freeSlots(finalSize);
+            std::vector<ItemId> result(finalSize);
+            std::vector<bool> inserted(finalSize, false);
+
+            for (std::size_t reverseIndex = insertionOrder.size(); reverseIndex > 0; --reverseIndex) {
+                const auto insertionIndex = reverseIndex - 1;
+                const auto &[snapshot, requestedIndex] = insertionOrder[insertionIndex];
+                const auto finalIndex = freeSlots.take(requestedIndex + 1);
+                result[finalIndex] = snapshot->id;
+                inserted[finalIndex] = true;
+            }
+
+            auto existingItInGroup = existing.begin();
+            for (std::size_t i = 0; i < result.size(); ++i) {
+                if (!inserted[i]) {
+                    result[i] = *existingItInGroup;
+                    ++existingItInGroup;
+                }
+            }
+            plans.push_back(PlannedListGroup {.key = key, .items = std::move(result)});
+        }
+        return true;
+    }
+
+    void insertSnapshotWithoutListGroup(DocumentEngine::Impl &engine, ItemSnapshot &snapshot)
+    {
+        validateSnapshot(engine, snapshot);
+        const auto id = snapshot.id;
+        engine.items[id] = RuntimeItem {std::move(snapshot)};
+        addItemToIndexes(engine, engine.items.at(id).snapshot);
+        observeItemId(engine, id);
+    }
+
+    void sortSnapshotPositionsById(std::vector<std::size_t> &positions,
+                                   const std::vector<ItemSnapshot> &snapshots)
+    {
+        constexpr std::size_t comparisonSortLimit = 64;
+        if (positions.size() <= comparisonSortLimit) {
+            std::sort(positions.begin(), positions.end(), [&](std::size_t lhs, std::size_t rhs) {
+                return snapshots[lhs].id < snapshots[rhs].id;
+            });
+            return;
+        }
+
+        std::vector<std::size_t> scratch(positions.size());
+        for (unsigned int shift = 0; shift < 64; shift += 8) {
+            std::array<std::size_t, 257> offsets {};
+            for (const auto position : positions) {
+                const auto bucket = (static_cast<std::uint64_t>(snapshots[position].id) >> shift) & 0xffU;
+                ++offsets[static_cast<std::size_t>(bucket) + 1];
+            }
+            for (std::size_t i = 1; i < offsets.size(); ++i) {
+                offsets[i] += offsets[i - 1];
+            }
+            for (const auto position : positions) {
+                const auto bucket = (static_cast<std::uint64_t>(snapshots[position].id) >> shift) & 0xffU;
+                scratch[offsets[static_cast<std::size_t>(bucket)]++] = position;
+            }
+            positions.swap(scratch);
+        }
+    }
+
+    void orderSnapshotsByParent(const DocumentEngine::Impl &engine,
+                                std::vector<ItemSnapshot> &snapshots,
+                                const std::unordered_map<ItemId, std::size_t> &positionById)
+    {
+        std::vector<std::size_t> childOffsets(snapshots.size() + 1, 0);
+        std::vector<bool> hasPendingParent(snapshots.size(), false);
+        for (std::size_t i = 0; i < snapshots.size(); ++i) {
+            if (!snapshots[i].parentId) {
+                continue;
+            }
+            const auto parent = positionById.find(*snapshots[i].parentId);
+            if (parent != positionById.end()) {
+                ++childOffsets[parent->second + 1];
+                hasPendingParent[i] = true;
+            }
+        }
+        for (std::size_t i = 1; i < childOffsets.size(); ++i) {
+            childOffsets[i] += childOffsets[i - 1];
+        }
+        std::vector<std::size_t> children(childOffsets.back());
+        {
+            auto nextChildPosition = childOffsets;
+            for (std::size_t i = 0; i < snapshots.size(); ++i) {
+                if (!snapshots[i].parentId) {
+                    continue;
+                }
+                const auto parent = positionById.find(*snapshots[i].parentId);
+                if (parent != positionById.end()) {
+                    children[nextChildPosition[parent->second]++] = i;
+                }
+            }
+        }
+
+        const auto &schemaDefinition = schemaData(engine.schema);
+        for (std::size_t parent = 0; parent < snapshots.size(); ++parent) {
+            const auto begin = childOffsets[parent];
+            const auto end = childOffsets[parent + 1];
+            if (end - begin < 2) {
+                continue;
+            }
+            std::vector<std::size_t> siblings(children.begin() + static_cast<std::ptrdiff_t>(begin),
+                                              children.begin() + static_cast<std::ptrdiff_t>(end));
+            const auto containerId = snapshots[siblings.front()].containerId;
+            const auto sameContainer = std::all_of(siblings.begin(), siblings.end(), [&](std::size_t position) {
+                return snapshots[position].containerId == containerId;
+            });
+            const auto &container = containerFor(schemaDefinition, containerId);
+            const auto hasUniqueColumn = std::any_of(container.columns.begin(), container.columns.end(), [](const auto &column) {
+                return column.info.index == IndexKind::Unique;
+            });
+            if (sameContainer && !hasUniqueColumn) {
+                sortSnapshotPositionsById(siblings, snapshots);
+                std::copy(siblings.begin(), siblings.end(), children.begin() + static_cast<std::ptrdiff_t>(begin));
+            }
+        }
+
+        std::deque<std::size_t> ready;
+        for (std::size_t i = 0; i < snapshots.size(); ++i) {
+            if (!hasPendingParent[i]) {
+                ready.push_back(i);
+            }
+        }
+        std::vector<std::size_t> order;
+        order.reserve(snapshots.size());
+        while (!ready.empty()) {
+            const auto position = ready.front();
+            ready.pop_front();
+            order.push_back(position);
+            for (auto child = childOffsets[position]; child < childOffsets[position + 1]; ++child) {
+                ready.push_back(children[child]);
+            }
+        }
+        if (order.size() != snapshots.size()) {
+            return;
+        }
+
+        std::vector<ItemSnapshot> ordered;
+        ordered.reserve(snapshots.size());
+        for (const auto position : order) {
+            ordered.push_back(std::move(snapshots[position]));
+        }
+        snapshots = std::move(ordered);
+    }
+
+    bool insertItemSnapshots(DocumentEngine::Impl &engine, std::vector<ItemSnapshot> snapshots)
+    {
+        std::unordered_map<ItemId, std::size_t> positionById;
+        positionById.reserve(snapshots.size());
+        for (std::size_t i = 0; i < snapshots.size(); ++i) {
+            if (engine.items.find(snapshots[i].id) != engine.items.end() ||
+                !positionById.emplace(snapshots[i].id, i).second) {
+                return false;
+            }
+        }
+        std::vector<PlannedListGroup> listPlans;
+        if (!planInsertedListGroups(engine, snapshots, listPlans)) {
+            return false;
+        }
+        std::vector<ItemId> appliedIds;
+        appliedIds.reserve(snapshots.size());
+        auto pending = std::move(snapshots);
+        orderSnapshotsByParent(engine, pending, positionById);
+        positionById.clear();
+        positionById.rehash(0);
+        while (!pending.empty()) {
+            bool progressed = false;
+            std::vector<ItemSnapshot> remaining;
+            remaining.reserve(pending.size());
+            for (auto &snapshot : pending) {
+                const auto id = snapshot.id;
+                try {
+                    insertSnapshotWithoutListGroup(engine, snapshot);
+                    appliedIds.push_back(id);
+                    progressed = true;
+                } catch (const DiniError &) {
+                    remaining.push_back(std::move(snapshot));
+                }
+            }
+            if (!progressed) {
+                for (auto it = appliedIds.rbegin(); it != appliedIds.rend(); ++it) {
+                    const auto itemIt = engine.items.find(*it);
+                    if (itemIt != engine.items.end()) {
+                        removeItemFromIndexes(engine, itemIt->second.snapshot);
+                        engine.items.erase(itemIt);
+                    }
+                }
+                return false;
+            }
+            pending = std::move(remaining);
+        }
+
+        for (auto &plan : listPlans) {
+            engine.listGroups[plan.key] = std::move(plan.items);
+            refreshListIndexes(engine, plan.key.first, plan.key.second);
+        }
+        return true;
+    }
+
+    const ItemSnapshot *removedSnapshot(const ChangeOperation &operation)
+    {
+        return std::visit(
+            [](const auto &change) -> const ItemSnapshot * {
+                using T = std::decay_t<decltype(change)>;
+                if constexpr (std::is_same_v<T, ItemRemovedChange> ||
+                              std::is_same_v<T, CascadeRemovedChange> ||
+                              std::is_same_v<T, ListRemovedChange>) {
+                    return &change.item;
+                }
+                return nullptr;
+            },
+            operation.payload());
     }
 
     void applyOperation(DocumentEngine::Impl &engine, const ChangeOperation &operation)
@@ -1325,32 +1738,77 @@ namespace dini {
     void applyChangeSet(DocumentEngine::Impl &engine, const ChangeSet &changeSet)
     {
         std::vector<ChangeOperation> pendingInserts;
-        for (const auto &operation : changeSet.operations()) {
+        const auto &operations = changeSet.operations();
+        for (std::size_t operationIndex = 0; operationIndex < operations.size();) {
+            if (operations[operationIndex].kind() == ChangeOperationKind::ItemInserted) {
+                auto end = operationIndex;
+                std::vector<ItemSnapshot> snapshots;
+                while (end < operations.size() && operations[end].kind() == ChangeOperationKind::ItemInserted) {
+                    snapshots.push_back(std::get<ItemInsertedChange>(operations[end].payload()).item);
+                    ++end;
+                }
+                if (snapshots.size() > 1 && insertItemSnapshots(engine, std::move(snapshots))) {
+                    operationIndex = end;
+                    continue;
+                }
+                for (; operationIndex < end; ++operationIndex) {
+                    try {
+                        applyOperation(engine, operations[operationIndex]);
+                    } catch (const DiniError &) {
+                        pendingInserts.push_back(operations[operationIndex]);
+                    }
+                }
+                continue;
+            }
+
+            if (removedSnapshot(operations[operationIndex])) {
+                auto end = operationIndex;
+                std::vector<const ItemSnapshot *> snapshots;
+                while (end < operations.size()) {
+                    const auto *snapshot = removedSnapshot(operations[end]);
+                    if (!snapshot) {
+                        break;
+                    }
+                    snapshots.push_back(snapshot);
+                    ++end;
+                }
+                if (snapshots.size() == 1) {
+                    applyOperation(engine, operations[operationIndex]);
+                } else {
+                    eraseSnapshots(engine, snapshots);
+                }
+                operationIndex = end;
+                continue;
+            }
+
+            const auto &operation = operations[operationIndex];
             try {
                 applyOperation(engine, operation);
             } catch (const DiniError &) {
-                const auto kind = operation.kind();
-                if (kind != ChangeOperationKind::ItemInserted && kind != ChangeOperationKind::ListInserted) {
+                if (operation.kind() != ChangeOperationKind::ListInserted) {
                     throw;
                 }
                 pendingInserts.push_back(operation);
             }
+            ++operationIndex;
         }
 
         while (!pendingInserts.empty()) {
             bool progressed = false;
-            for (auto it = pendingInserts.begin(); it != pendingInserts.end();) {
+            std::vector<ChangeOperation> remaining;
+            remaining.reserve(pendingInserts.size());
+            for (auto &operation : pendingInserts) {
                 try {
-                    applyOperation(engine, *it);
-                    it = pendingInserts.erase(it);
+                    applyOperation(engine, operation);
                     progressed = true;
                 } catch (const DiniError &) {
-                    ++it;
+                    remaining.push_back(std::move(operation));
                 }
             }
             if (!progressed) {
-                applyOperation(engine, pendingInserts.front());
+                applyOperation(engine, remaining.front());
             }
+            pendingInserts = std::move(remaining);
         }
     }
 
@@ -3215,16 +3673,16 @@ void Transaction::remove(ItemId itemId)
         collect(itemId);
         ChangeSet operationChange;
         bool first = true;
-        for (const auto &snapshot : toRemove) {
+        for (auto &snapshot : toRemove) {
             if (first) {
                 operationChange.append(ChangeOperation(ItemRemovedChange {
-                    .item = snapshot,
+                    .item = std::move(snapshot),
                     .cascade = false,
                 }));
                 first = false;
             } else {
                 operationChange.append(ChangeOperation(CascadeRemovedChange {
-                    .item = snapshot,
+                    .item = std::move(snapshot),
                     .ancestorId = itemId,
                 }));
             }
@@ -3234,10 +3692,15 @@ void Transaction::remove(ItemId itemId)
         const auto derivedStart = _impl->changeSet.operations().size();
         runHooks(engine, HookStage::BeforeApply, beforeContext, operationChange, true);
         const auto derivedEnd = _impl->changeSet.operations().size();
-        for (const auto &snapshot : toRemove) {
-            recordRollbackForSnapshotRemove(*_impl, snapshot);
+        std::vector<const ItemSnapshot *> removedSnapshots;
+        removedSnapshots.reserve(operationChange.operations().size());
+        for (const auto &operation : operationChange.operations()) {
+            if (const auto *snapshot = removedSnapshot(operation)) {
+                removedSnapshots.push_back(snapshot);
+            }
         }
-        eraseSnapshots(engine, toRemove);
+        const auto removedItemIds = recordRollbackForSnapshotsRemove(*_impl, removedSnapshots);
+        eraseSnapshots(engine, removedSnapshots, &removedItemIds);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
         runHooks(engine, HookStage::AfterApply, afterContext, operationChange, false);
