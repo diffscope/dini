@@ -10,6 +10,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 #include <dini/errors.h>
 
@@ -1198,6 +1199,52 @@ namespace dini {
         removeItemFromIndexes(engine, snapshot);
         removeFromListGroup(engine, snapshot);
         engine.items.erase(snapshot.id);
+    }
+
+    void eraseSnapshots(DocumentEngine::Impl &engine, const std::vector<ItemSnapshot> &snapshots)
+    {
+        std::unordered_set<ItemId> removedItemIds;
+        removedItemIds.reserve(snapshots.size());
+        for (const auto &snapshot : snapshots) {
+            removedItemIds.insert(snapshot.id);
+        }
+
+        std::unique_ptr<RuntimeIndexStore> replacementIndexes;
+        if (removedItemIds.size() > engine.items.size() / 2) {
+            replacementIndexes = std::make_unique<RuntimeIndexStore>();
+            for (const auto &[id, item] : engine.items) {
+                if (removedItemIds.find(id) == removedItemIds.end()) {
+                    replacementIndexes->addItem(schemaData(engine.schema), item.snapshot);
+                }
+            }
+        } else {
+            for (const auto &snapshot : snapshots) {
+                removeItemFromIndexes(engine, snapshot);
+            }
+        }
+
+        for (auto &[key, group] : engine.listGroups) {
+            const auto retainedEnd = std::remove_if(group.begin(), group.end(), [&](ItemId id) {
+                return removedItemIds.find(id) != removedItemIds.end();
+            });
+            if (retainedEnd == group.end()) {
+                continue;
+            }
+            group.erase(retainedEnd, group.end());
+            for (std::size_t i = 0; i < group.size(); ++i) {
+                auto itemIt = engine.items.find(group[i]);
+                if (itemIt != engine.items.end()) {
+                    itemIt->second.snapshot.listIndex = i;
+                }
+            }
+        }
+
+        for (const auto &snapshot : snapshots) {
+            engine.items.erase(snapshot.id);
+        }
+        if (replacementIndexes) {
+            engine.indexes = std::move(*replacementIndexes);
+        }
     }
 
     void applyOperation(DocumentEngine::Impl &engine, const ChangeOperation &operation)
@@ -3144,6 +3191,14 @@ void Transaction::remove(ItemId itemId)
         if (it == engine.items.end()) {
             throw QueryError("item does not exist");
         }
+        std::unordered_map<ItemId, std::vector<ItemId>> childrenByParent;
+        childrenByParent.reserve(engine.items.size());
+        for (const auto &[candidateId, candidate] : engine.items) {
+            if (candidate.snapshot.parentId) {
+                childrenByParent[*candidate.snapshot.parentId].push_back(candidateId);
+            }
+        }
+
         std::vector<ItemSnapshot> toRemove;
         std::function<void(ItemId)> collect = [&](ItemId id) {
             auto itemIt = engine.items.find(id);
@@ -3151,9 +3206,9 @@ void Transaction::remove(ItemId itemId)
                 return;
             }
             toRemove.push_back(itemIt->second.snapshot);
-            for (const auto &[candidateId, candidate] : engine.items) {
-                if (candidate.snapshot.parentId == id) {
-                    collect(candidateId);
+            if (const auto children = childrenByParent.find(id); children != childrenByParent.end()) {
+                for (const auto childId : children->second) {
+                    collect(childId);
                 }
             }
         };
@@ -3182,9 +3237,7 @@ void Transaction::remove(ItemId itemId)
         for (const auto &snapshot : toRemove) {
             recordRollbackForSnapshotRemove(*_impl, snapshot);
         }
-        for (const auto &snapshot : toRemove) {
-            eraseSnapshot(engine, snapshot);
-        }
+        eraseSnapshots(engine, toRemove);
         appendWithDerivedLinks(*_impl, operationChange, derivedStart, derivedEnd);
         auto afterContext = makeContext();
         runHooks(engine, HookStage::AfterApply, afterContext, operationChange, false);
