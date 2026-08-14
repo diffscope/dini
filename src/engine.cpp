@@ -617,6 +617,47 @@ namespace dini {
         }
     }
 
+    void appendChangeSet(Transaction::Impl &transaction, const ChangeSet &changeSet)
+    {
+        const auto operationOffset = transaction.changeSet.operations().size();
+        for (const auto &operation : changeSet.operations()) {
+            transaction.changeSet.append(operation);
+        }
+        for (const auto &link : changeSet.derivedLinks()) {
+            transaction.changeSet.addDerivedLink(DerivedChangeLink {
+                .sourceOperation = operationOffset + link.sourceOperation,
+                .derivedOperation = operationOffset + link.derivedOperation,
+            });
+        }
+    }
+
+    void appendIndependentChange(ChangeSet &target, const ChangeSet &changeSet)
+    {
+        const auto operationOffset = target.operations().size();
+        for (const auto &operation : changeSet.operations()) {
+            target.append(operation);
+        }
+        for (const auto &link : changeSet.derivedLinks()) {
+            target.addDerivedLink(DerivedChangeLink {
+                .sourceOperation = operationOffset + link.sourceOperation,
+                .derivedOperation = operationOffset + link.derivedOperation,
+            });
+        }
+        for (std::size_t derived = 1; derived < changeSet.operations().size(); ++derived) {
+            target.addDerivedLink(DerivedChangeLink {
+                .sourceOperation = operationOffset,
+                .derivedOperation = operationOffset + derived,
+            });
+        }
+    }
+
+    bool hasApplyHooks(const ContainerDefinitionRecord &container)
+    {
+        return std::any_of(container.hooks.begin(), container.hooks.end(), [](const HookDefinition &hook) {
+            return hook.stage == HookStage::BeforeApply || hook.stage == HookStage::AfterApply;
+        });
+    }
+
     void requireActive(Transaction::Impl *impl)
     {
         if (!impl || impl->state != TransactionState::Active || !impl->engine) {
@@ -1645,6 +1686,20 @@ namespace dini {
         return true;
     }
 
+    const ItemSnapshot *insertedSnapshot(const ChangeOperation &operation)
+    {
+        return std::visit(
+            [](const auto &change) -> const ItemSnapshot * {
+                using T = std::decay_t<decltype(change)>;
+                if constexpr (std::is_same_v<T, ItemInsertedChange> ||
+                              std::is_same_v<T, ListInsertedChange>) {
+                    return &change.item;
+                }
+                return nullptr;
+            },
+            operation.payload());
+    }
+
     const ItemSnapshot *removedSnapshot(const ChangeOperation &operation)
     {
         return std::visit(
@@ -1740,11 +1795,15 @@ namespace dini {
         std::vector<ChangeOperation> pendingInserts;
         const auto &operations = changeSet.operations();
         for (std::size_t operationIndex = 0; operationIndex < operations.size();) {
-            if (operations[operationIndex].kind() == ChangeOperationKind::ItemInserted) {
+            if (insertedSnapshot(operations[operationIndex])) {
                 auto end = operationIndex;
                 std::vector<ItemSnapshot> snapshots;
-                while (end < operations.size() && operations[end].kind() == ChangeOperationKind::ItemInserted) {
-                    snapshots.push_back(std::get<ItemInsertedChange>(operations[end].payload()).item);
+                while (end < operations.size()) {
+                    const auto *snapshot = insertedSnapshot(operations[end]);
+                    if (!snapshot) {
+                        break;
+                    }
+                    snapshots.push_back(*snapshot);
                     ++end;
                 }
                 if (snapshots.size() > 1 && insertItemSnapshots(engine, std::move(snapshots))) {
@@ -3291,21 +3350,23 @@ ItemId TransactionContext::insert(TableHandle table, std::vector<ColumnValue> va
     }
 }
 
-ItemId TransactionContext::insert(ListHandle list,
-                                  Value associationValue,
-                                  std::size_t index,
-                                  std::vector<ColumnValue> values,
-                                  std::optional<VariantHandle> variant)
+std::vector<ItemId> TransactionContext::insert(ListHandle list,
+                                               Value associationValue,
+                                               std::size_t index,
+                                               std::vector<ListInsertItem> items)
 {
     if (!_impl || !_impl->mutationAllowed) {
         throw HookError("mutation is not allowed in this hook stage");
     }
     Transaction transaction(std::make_unique<Transaction::Impl>(*_impl->transaction));
     try {
-        auto id = transaction.insert(std::move(list), std::move(associationValue), index, std::move(values), std::move(variant));
+        auto ids = transaction.insert(std::move(list),
+                                      std::move(associationValue),
+                                      index,
+                                      std::move(items));
         *_impl->transaction = *transaction._impl;
         transaction._impl->state = TransactionState::Committed;
-        return id;
+        return ids;
     } catch (...) {
         markFailed(*_impl->transaction);
         throw;
@@ -3555,11 +3616,103 @@ ItemId Transaction::insert(TableHandle table, std::vector<ColumnValue> values, s
     }
 }
 
-ItemId Transaction::insert(ListHandle list,
-                           Value associationValue,
-                           std::size_t index,
-                           std::vector<ColumnValue> values,
-                           std::optional<VariantHandle> variant)
+std::vector<ItemId> Transaction::insert(ListHandle list,
+                                        Value associationValue,
+                                        std::size_t index,
+                                        std::vector<ListInsertItem> items)
+{
+    requireActive(_impl.get());
+    auto &engine = *_impl->engine;
+    try {
+        engine.schema.validate(list);
+        const auto &schemaDefinition = schemaData(engine.schema);
+        const auto &container = containerFor(schemaDefinition, list.containerId());
+        if (!container.listAssociation) {
+            throw ConstraintError("list association is not defined");
+        }
+        const auto *relation = findRelation(schemaDefinition, list.containerId(), *container.listAssociation);
+        if (!associationValue.isNull()) {
+            const auto groupKey = valueKey(associationValue);
+            const auto groupIt = engine.listGroups.find({list.containerId(), groupKey});
+            const auto groupSize = groupIt == engine.listGroups.end() ? std::size_t {0} : groupIt->second.size();
+            if (index > groupSize) {
+                throw ConstraintError("list insertion index is out of range");
+            }
+        } else if (index != 0) {
+            throw ConstraintError("null list association insertion index must be zero");
+        }
+
+        std::vector<ItemId> ids;
+        ids.reserve(items.size());
+        if (items.empty()) {
+            return ids;
+        }
+        if (hasApplyHooks(container)) {
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                auto &item = items[i];
+                ids.push_back(insertListItem(list,
+                                             associationValue,
+                                             associationValue.isNull() ? 0 : index + i,
+                                             std::move(item.values),
+                                             std::move(item.variant)));
+            }
+            return ids;
+        }
+
+        std::vector<ItemSnapshot> snapshots;
+        snapshots.reserve(items.size());
+        ChangeSet operationChange;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            auto &item = items[i];
+            ItemSnapshot snapshot;
+            snapshot.id = generateItemId(engine);
+            snapshot.containerKind = ContainerKind::List;
+            snapshot.containerId = list.containerId();
+            snapshot.variant = std::move(item.variant);
+            snapshot.values = std::move(item.values);
+            setColumnValue(snapshot, relation->info.column, associationValue);
+            if (!associationValue.isNull()) {
+                snapshot.listAssociationValue = associationValue;
+                snapshot.listIndex = index + i;
+            }
+            validateSnapshot(engine, snapshot);
+            auto itemChange = associationValue.isNull()
+                                  ? insertChangeSetForSnapshot(schemaDefinition, snapshot)
+                                  : listInsertChangeSetForSnapshot(schemaDefinition,
+                                                                   list,
+                                                                   associationValue,
+                                                                   index + i,
+                                                                   snapshot);
+            appendIndependentChange(operationChange, itemChange);
+            ids.push_back(snapshot.id);
+            snapshots.push_back(std::move(snapshot));
+        }
+
+        for (const auto &snapshot : snapshots) {
+            recordRollbackForSnapshotInsert(*_impl, snapshot);
+        }
+        if (!insertItemSnapshots(engine, std::move(snapshots))) {
+            throw ConstraintError("list insertion batch violates a constraint");
+        }
+        appendChangeSet(*_impl, operationChange);
+        auto data = std::make_unique<TransactionContext::Impl>();
+        data->transaction = _impl.get();
+        data->origin = _impl->origin;
+        TransactionContext afterContext(std::move(data));
+        runHooks(engine, HookStage::AfterApply, afterContext, operationChange, false);
+        publish(engine, EventKind::AfterApply, _impl->origin, operationChange);
+        return ids;
+    } catch (...) {
+        markFailed(*_impl);
+        throw;
+    }
+}
+
+ItemId Transaction::insertListItem(ListHandle list,
+                                   Value associationValue,
+                                   std::size_t index,
+                                   std::vector<ColumnValue> values,
+                                   std::optional<VariantHandle> variant)
 {
     requireActive(_impl.get());
     auto &engine = *_impl->engine;
@@ -3711,7 +3864,65 @@ void Transaction::remove(ItemId itemId)
     }
 }
 
-void Transaction::removeAt(ListHandle list, Value associationValue, std::size_t index)
+void Transaction::removeAt(ListHandle list,
+                           Value associationValue,
+                           std::size_t index,
+                           std::size_t count)
+{
+    requireActive(_impl.get());
+    auto &engine = *_impl->engine;
+    try {
+        engine.schema.validate(list);
+        const auto key = valueKey(associationValue);
+        const auto groupIt = engine.listGroups.find({list.containerId(), key});
+        const auto groupSize = groupIt == engine.listGroups.end() ? std::size_t {0} : groupIt->second.size();
+        if (index > groupSize || count > groupSize - index) {
+            throw QueryError("list remove range is out of range");
+        }
+        if (count == 0) {
+            return;
+        }
+
+        const auto &container = containerFor(schemaData(engine.schema), list.containerId());
+        if (hasApplyHooks(container)) {
+            for (std::size_t i = count; i > 0; --i) {
+                removeListItemAt(list, associationValue, index + i - 1);
+            }
+            return;
+        }
+
+        std::vector<ItemSnapshot> snapshots;
+        snapshots.reserve(count);
+        ChangeSet operationChange;
+        for (std::size_t i = count; i > 0; --i) {
+            const auto removedIndex = index + i - 1;
+            const auto itemId = groupIt->second[removedIndex];
+            auto snapshot = engine.items.at(itemId).snapshot;
+            operationChange.append(ChangeOperation(ListRemovedChange {
+                .list = list,
+                .associationValue = associationValue,
+                .index = removedIndex,
+                .item = snapshot,
+            }));
+            snapshots.push_back(std::move(snapshot));
+        }
+
+        const auto removedItemIds = recordRollbackForSnapshotsRemove(*_impl, snapshots);
+        eraseSnapshots(engine, snapshots, &removedItemIds);
+        appendChangeSet(*_impl, operationChange);
+        auto data = std::make_unique<TransactionContext::Impl>();
+        data->transaction = _impl.get();
+        data->origin = _impl->origin;
+        TransactionContext afterContext(std::move(data));
+        runHooks(engine, HookStage::AfterApply, afterContext, operationChange, false);
+        publish(engine, EventKind::AfterApply, _impl->origin, operationChange);
+    } catch (...) {
+        markFailed(*_impl);
+        throw;
+    }
+}
+
+void Transaction::removeListItemAt(ListHandle list, Value associationValue, std::size_t index)
 {
     requireActive(_impl.get());
     auto &engine = *_impl->engine;

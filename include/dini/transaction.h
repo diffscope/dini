@@ -30,6 +30,14 @@ struct DINI_EXPORT CommitResult {
 };
 
 /**
+ * @brief Initial values for one element in a list insertion batch.
+ */
+struct DINI_EXPORT ListInsertItem {
+    std::vector<ColumnValue> values;
+    std::optional<VariantHandle> variant;
+};
+
+/**
  * @brief Mutation facade passed to schema hooks.
  *
  * TransactionContext exposes controlled write operations to hook callbacks. Only
@@ -117,18 +125,20 @@ public:
     ItemId insert(TableHandle table, std::vector<ColumnValue> values, std::optional<VariantHandle> variant = {});
 
     /**
-     * @brief Inserts a list element from inside an allowed hook.
+     * @brief Inserts a contiguous batch of list elements from inside an allowed hook.
      *
      * @param list Target list.
      * @param associationValue Association value identifying the list instance, or null to create an unattached list item.
      * @param index Insertion index inside the association-value group; must be 0 when associationValue is null.
-     * @param values Initial column values.
-     * @param variant Optional polymorphic variant for polymorphic lists.
+     * @param items Initial column values and optional variants in insertion order.
      * @pre The context must be in a BeforeApply hook, and index must be within the current list length or 0 for null association.
-     * @post A new globally unique list element is visible at the requested position, or unattached when associationValue is null.
+     * @post New globally unique list elements are visible contiguously in input order, or unattached when associationValue is null.
      * @throws HookError if mutation is forbidden in the current hook stage.
      */
-    ItemId insert(ListHandle list, Value associationValue, std::size_t index, std::vector<ColumnValue> values, std::optional<VariantHandle> variant = {});
+    std::vector<ItemId> insert(ListHandle list,
+                               Value associationValue,
+                               std::size_t index,
+                               std::vector<ListInsertItem> items);
 
     /**
      * @brief Removes an item by ID from inside an allowed hook.
@@ -293,18 +303,20 @@ public:
     ItemId insert(TableHandle table, std::vector<ColumnValue> values, std::optional<VariantHandle> variant = {});
 
     /**
-     * @brief Inserts a list element at an explicit position.
+     * @brief Inserts a contiguous batch of list elements at an explicit position.
      *
      * @param list Target list.
      * @param associationValue Association value identifying the list instance, or null to create an unattached list item.
      * @param index Insertion index inside the association-value group; must be 0 when associationValue is null.
-     * @param values Initial column values.
-     * @param variant Optional polymorphic variant for polymorphic lists.
+     * @param items Initial column values and optional variants in insertion order.
      * @pre The transaction must be active, and index must be within the current list length or 0 for null association.
-     * @post A new globally unique list element is visible at the requested position, or unattached when associationValue is null.
+     * @post New globally unique list elements are visible contiguously in input order, or unattached when associationValue is null.
      * @throws TransactionError if the transaction is inactive or failed.
      */
-    ItemId insert(ListHandle list, Value associationValue, std::size_t index, std::vector<ColumnValue> values, std::optional<VariantHandle> variant = {});
+    std::vector<ItemId> insert(ListHandle list,
+                               Value associationValue,
+                               std::size_t index,
+                               std::vector<ListInsertItem> items);
 
     /**
      * @brief Removes an item by global ID.
@@ -317,16 +329,17 @@ public:
     void remove(ItemId itemId);
 
     /**
-     * @brief Removes a list element at a concrete list position.
+     * @brief Removes a contiguous range of list elements at a concrete position.
      *
      * @param list Target list.
      * @param associationValue Association value identifying the list instance.
-     * @param index Element index to remove.
-     * @pre The transaction must be active and index must identify an existing element.
-     * @post The element is removed and following indexes remain contiguous.
+     * @param index First element index to remove.
+     * @param count Number of elements to remove.
+     * @pre The transaction must be active and the half-open range [index, index + count) must be valid.
+     * @post The elements are removed and following indexes remain contiguous.
      * @throws TransactionError if the transaction is inactive or failed.
      */
-    void removeAt(ListHandle list, Value associationValue, std::size_t index);
+    void removeAt(ListHandle list, Value associationValue, std::size_t index, std::size_t count);
 
     /**
      * @brief Updates a writable column value.
@@ -386,6 +399,12 @@ private:
     std::unique_ptr<Impl> _impl;
 
     explicit Transaction(std::unique_ptr<Impl> data);
+    ItemId insertListItem(ListHandle list,
+                          Value associationValue,
+                          std::size_t index,
+                          std::vector<ColumnValue> values,
+                          std::optional<VariantHandle> variant);
+    void removeListItemAt(ListHandle list, Value associationValue, std::size_t index);
     friend class DocumentEngine;
     friend class TransactionContext;
 };

@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <dini/engine.h>
@@ -23,6 +24,18 @@ ColumnDefinition stringColumn(const char *debugName, IndexKind index = IndexKind
 Value idValue(ItemId id)
 {
     return Value(static_cast<std::uint64_t>(id));
+}
+
+ItemId insertListItem(Transaction &transaction,
+                      ListHandle list,
+                      Value associationValue,
+                      std::size_t index,
+                      std::vector<ColumnValue> values)
+{
+    return transaction.insert(list,
+                              std::move(associationValue),
+                              index,
+                              {{.values = std::move(values)}}).front();
 }
 
 TEST(DocumentEngineSmokeTest, DefinesSchemaAndExercisesBasicDocumentOperations)
@@ -113,13 +126,13 @@ TEST(DocumentEngineSmokeTest, DefinesSchemaAndExercisesBasicDocumentOperations)
 
         // Exercise first-class list operations: positional insert, range rotate,
         // and positional remove inside one association group.
-        aliceId = transaction.insert(aliceList.handle(), idValue(documentId), 0, {
+        aliceId = insertListItem(transaction, aliceList.handle(), idValue(documentId), 0, {
             ColumnValue {.column = aliceName, .value = Value("Alice")},
         });
-        alicePeerId = transaction.insert(aliceList.handle(), idValue(documentId), 1, {
+        alicePeerId = insertListItem(transaction, aliceList.handle(), idValue(documentId), 1, {
             ColumnValue {.column = aliceName, .value = Value("Alicia")},
         });
-        transaction.insert(aliceList.handle(), idValue(documentId), 2, {
+        insertListItem(transaction, aliceList.handle(), idValue(documentId), 2, {
             ColumnValue {.column = aliceName, .value = Value("Ally")},
         });
 
@@ -129,7 +142,7 @@ TEST(DocumentEngineSmokeTest, DefinesSchemaAndExercisesBasicDocumentOperations)
             .offset = 1,
         };
         transaction.rotate(aliceList.handle(), idValue(documentId), rotation);
-        transaction.removeAt(aliceList.handle(), idValue(documentId), 1);
+        transaction.removeAt(aliceList.handle(), idValue(documentId), 1, 1);
 
         transaction.commit();
     }

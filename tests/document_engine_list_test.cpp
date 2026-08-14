@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <dini/engine.h>
@@ -47,6 +49,18 @@ ColumnDefinition int64Column(const char *debugName, IndexKind index = IndexKind:
 Value idValue(ItemId id)
 {
     return Value(static_cast<std::uint64_t>(id));
+}
+
+ItemId insertListItem(Transaction &transaction,
+                      ListHandle list,
+                      Value associationValue,
+                      std::size_t index,
+                      std::vector<ColumnValue> values)
+{
+    return transaction.insert(list,
+                              std::move(associationValue),
+                              index,
+                              {{.values = std::move(values)}}).front();
 }
 
 struct PlaylistSchema {
@@ -138,7 +152,7 @@ TEST(DocumentEngineListTest, ListInsertAtPositions)
     ItemId third = 0;
     {
         auto tx = engine.beginTransaction();
-        first = tx.insert(ps.playlistList, assocValue, 0, {
+        first = insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
         tx.commit();
@@ -148,7 +162,7 @@ TEST(DocumentEngineListTest, ListInsertAtPositions)
     {
         // Insert at index 0 shifts the existing element to index 1.
         auto tx = engine.beginTransaction();
-        second = tx.insert(ps.playlistList, assocValue, 0, {
+        second = insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(20))},
         });
         tx.commit();
@@ -158,7 +172,7 @@ TEST(DocumentEngineListTest, ListInsertAtPositions)
     {
         // Insert at index == length appends.
         auto tx = engine.beginTransaction();
-        third = tx.insert(ps.playlistList, assocValue, 2, {
+        third = insertListItem(tx, ps.playlistList, assocValue, 2, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(30))},
         });
         tx.commit();
@@ -206,7 +220,7 @@ TEST(DocumentEngineListTest, ListInsertAtEnd)
     ItemId b = 0;
     {
         auto tx = engine.beginTransaction();
-        a = tx.insert(ps.playlistList, assocValue, 0, {
+        a = insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(100))},
         });
         tx.commit();
@@ -216,7 +230,7 @@ TEST(DocumentEngineListTest, ListInsertAtEnd)
     {
         auto tx = engine.beginTransaction();
         const auto currentLen = engine.listLength(ps.playlistList, assocValue);
-        b = tx.insert(ps.playlistList, assocValue, currentLen, {
+        b = insertListItem(tx, ps.playlistList, assocValue, currentLen, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(200))},
         });
         tx.commit();
@@ -241,13 +255,13 @@ TEST(DocumentEngineListTest, ListRemoveAt)
     ItemId last = 0;
     {
         auto tx = engine.beginTransaction();
-        first = tx.insert(ps.playlistList, assocValue, 0, {
+        first = insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
-        middle = tx.insert(ps.playlistList, assocValue, 1, {
+        middle = insertListItem(tx, ps.playlistList, assocValue, 1, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(20))},
         });
-        last = tx.insert(ps.playlistList, assocValue, 2, {
+        last = insertListItem(tx, ps.playlistList, assocValue, 2, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(30))},
         });
         tx.commit();
@@ -257,7 +271,7 @@ TEST(DocumentEngineListTest, ListRemoveAt)
     // Remove the middle element at index 1.  Remaining items must stay contiguous.
     {
         auto tx = engine.beginTransaction();
-        tx.removeAt(ps.playlistList, assocValue, 1);
+        tx.removeAt(ps.playlistList, assocValue, 1, 1);
         tx.commit();
     }
     EXPECT_EQ(engine.listLength(ps.playlistList, assocValue), 2U);
@@ -285,6 +299,76 @@ TEST(DocumentEngineListTest, ListRemoveAt)
     }
 }
 
+TEST(DocumentEngineListTest, ListBatchInsertAndRemovePreserveOrderAndUndo)
+{
+    const PlaylistSchema ps;
+    DocumentEngine engine(ps.schema);
+    const auto songs = seedThreeSongs(engine, ps);
+    const auto assocValue = idValue(songs.song1);
+
+    std::vector<ItemId> outer;
+    {
+        auto tx = engine.beginTransaction();
+        outer = tx.insert(ps.playlistList,
+                          assocValue,
+                          0,
+                          {
+                              {.values = {
+                                   {.column = ps.playlistPosition, .value = Value(std::int64_t {10})},
+                               }},
+                              {.values = {
+                                   {.column = ps.playlistPosition, .value = Value(std::int64_t {40})},
+                               }},
+                          });
+        tx.commit();
+    }
+
+    std::vector<ItemId> middle;
+    CommitResult insertResult;
+    {
+        auto tx = engine.beginTransaction();
+        middle = tx.insert(ps.playlistList,
+                           assocValue,
+                           1,
+                           {
+                               {.values = {
+                                    {.column = ps.playlistPosition, .value = Value(std::int64_t {20})},
+                                }},
+                               {.values = {
+                                    {.column = ps.playlistPosition, .value = Value(std::int64_t {30})},
+                                }},
+                           });
+        insertResult = tx.commit();
+    }
+
+    ASSERT_EQ(outer.size(), 2U);
+    ASSERT_EQ(middle.size(), 2U);
+    EXPECT_EQ(orderedIdsForAssociation(engine.view(ps.playlistList), assocValue),
+              (std::vector<ItemId> {outer[0], middle[0], middle[1], outer[1]}));
+    EXPECT_EQ(std::count_if(insertResult.changeSet.operations().begin(),
+                            insertResult.changeSet.operations().end(),
+                            [](const ChangeOperation &operation) {
+                                return operation.kind() == ChangeOperationKind::ListInserted;
+                            }),
+              2);
+
+    CommitResult removeResult;
+    {
+        auto tx = engine.beginTransaction();
+        tx.removeAt(ps.playlistList, assocValue, 1, 2);
+        removeResult = tx.commit();
+    }
+    EXPECT_EQ(orderedIdsForAssociation(engine.view(ps.playlistList), assocValue), outer);
+    ASSERT_EQ(removeResult.changeSet.operations().size(), 2U);
+    EXPECT_EQ(std::get<ListRemovedChange>(removeResult.changeSet.operations()[0].payload()).index, 2U);
+    EXPECT_EQ(std::get<ListRemovedChange>(removeResult.changeSet.operations()[1].payload()).index, 1U);
+
+    ASSERT_TRUE(engine.canUndo());
+    engine.undo();
+    EXPECT_EQ(orderedIdsForAssociation(engine.view(ps.playlistList), assocValue),
+              (std::vector<ItemId> {outer[0], middle[0], middle[1], outer[1]}));
+}
+
 TEST(DocumentEngineListTest, ListRemoveById)
 {
     const PlaylistSchema ps;
@@ -296,10 +380,10 @@ TEST(DocumentEngineListTest, ListRemoveById)
     ItemId b = 0;
     {
         auto tx = engine.beginTransaction();
-        a = tx.insert(ps.playlistList, assocValue, 0, {
+        a = insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
-        b = tx.insert(ps.playlistList, assocValue, 1, {
+        b = insertListItem(tx, ps.playlistList, assocValue, 1, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(20))},
         });
         tx.commit();
@@ -330,7 +414,7 @@ TEST(DocumentEngineListTest, ListRotateForward)
     {
         auto tx = engine.beginTransaction();
         for (std::size_t i = 0; i < 5; ++i) {
-            elements[i] = tx.insert(ps.playlistList, assocValue, i, {
+            elements[i] = insertListItem(tx, ps.playlistList, assocValue, i, {
                 ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(static_cast<std::int64_t>(i) * 10))},
             });
         }
@@ -367,7 +451,7 @@ TEST(DocumentEngineListTest, ListRotateBackward)
     {
         auto tx = engine.beginTransaction();
         for (std::size_t i = 0; i < 5; ++i) {
-            elements[i] = tx.insert(ps.playlistList, assocValue, i, {
+            elements[i] = insertListItem(tx, ps.playlistList, assocValue, i, {
                 ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(static_cast<std::int64_t>(i) * 10))},
             });
         }
@@ -402,7 +486,7 @@ TEST(DocumentEngineListTest, ListRotateSingleElement)
     ItemId solo = 0;
     {
         auto tx = engine.beginTransaction();
-        solo = tx.insert(ps.playlistList, assocValue, 0, {
+        solo = insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(42))},
         });
         tx.commit();
@@ -432,7 +516,7 @@ TEST(DocumentEngineListTest, ListRotateFullRange)
     {
         auto tx = engine.beginTransaction();
         for (std::size_t i = 0; i < 4; ++i) {
-            elements[i] = tx.insert(ps.playlistList, assocValue, i, {
+            elements[i] = insertListItem(tx, ps.playlistList, assocValue, i, {
                 ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(static_cast<std::int64_t>(i) * 10))},
             });
         }
@@ -469,13 +553,13 @@ TEST(DocumentEngineListTest, ListMultipleInstances)
     ItemId b1 = 0;
     {
         auto tx = engine.beginTransaction();
-        a1 = tx.insert(ps.playlistList, assoc1, 0, {
+        a1 = insertListItem(tx, ps.playlistList, assoc1, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
-        a2 = tx.insert(ps.playlistList, assoc1, 1, {
+        a2 = insertListItem(tx, ps.playlistList, assoc1, 1, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(20))},
         });
-        b1 = tx.insert(ps.playlistList, assoc2, 0, {
+        b1 = insertListItem(tx, ps.playlistList, assoc2, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(100))},
         });
         tx.commit();
@@ -487,7 +571,7 @@ TEST(DocumentEngineListTest, ListMultipleInstances)
     // Remove from association 1 – association 2 must remain unchanged.
     {
         auto tx = engine.beginTransaction();
-        tx.removeAt(ps.playlistList, assoc1, 0);
+        tx.removeAt(ps.playlistList, assoc1, 0, 1);
         tx.commit();
     }
 
@@ -518,7 +602,7 @@ TEST(DocumentEngineListTest, ListInsertEmptyInstance)
     ItemId element = 0;
     {
         auto tx = engine.beginTransaction();
-        element = tx.insert(ps.playlistList, assocValue, 0, {
+        element = insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(77))},
         });
         tx.commit();
@@ -542,7 +626,7 @@ TEST(DocumentEngineListTest, ListClearThroughRepeatedRemove)
     {
         auto tx = engine.beginTransaction();
         for (std::size_t i = 0; i < 5; ++i) {
-            tx.insert(ps.playlistList, assocValue, i, {
+            insertListItem(tx, ps.playlistList, assocValue, i, {
                 ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(static_cast<std::int64_t>(i) * 10))},
             });
         }
@@ -555,7 +639,7 @@ TEST(DocumentEngineListTest, ListClearThroughRepeatedRemove)
         auto tx = engine.beginTransaction();
         std::size_t remaining = engine.listLength(ps.playlistList, assocValue);
         while (remaining > 0) {
-            tx.removeAt(ps.playlistList, assocValue, 0);
+            tx.removeAt(ps.playlistList, assocValue, 0, 1);
             --remaining;
         }
         tx.commit();
@@ -576,10 +660,10 @@ TEST(DocumentEngineListTest, ListUndoInsertRestoresIndex)
     // Establish a baseline of 2 elements.
     {
         auto tx = engine.beginTransaction();
-        tx.insert(ps.playlistList, assocValue, 0, {
+        insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
-        tx.insert(ps.playlistList, assocValue, 1, {
+        insertListItem(tx, ps.playlistList, assocValue, 1, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(20))},
         });
         tx.commit();
@@ -591,7 +675,7 @@ TEST(DocumentEngineListTest, ListUndoInsertRestoresIndex)
     // Insert one more element.
     {
         auto tx = engine.beginTransaction();
-        tx.insert(ps.playlistList, assocValue, 1, {
+        insertListItem(tx, ps.playlistList, assocValue, 1, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(15))},
         });
         tx.commit();
@@ -620,13 +704,13 @@ TEST(DocumentEngineListTest, ListUndoRemoveRestoresItemAndIndex)
     ItemId c = 0;
     {
         auto tx = engine.beginTransaction();
-        a = tx.insert(ps.playlistList, assocValue, 0, {
+        a = insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
-        b = tx.insert(ps.playlistList, assocValue, 1, {
+        b = insertListItem(tx, ps.playlistList, assocValue, 1, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(20))},
         });
-        c = tx.insert(ps.playlistList, assocValue, 2, {
+        c = insertListItem(tx, ps.playlistList, assocValue, 2, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(30))},
         });
         tx.commit();
@@ -635,7 +719,7 @@ TEST(DocumentEngineListTest, ListUndoRemoveRestoresItemAndIndex)
     // Remove the middle element.
     {
         auto tx = engine.beginTransaction();
-        tx.removeAt(ps.playlistList, assocValue, 1);
+        tx.removeAt(ps.playlistList, assocValue, 1, 1);
         tx.commit();
     }
     EXPECT_EQ(engine.listLength(ps.playlistList, assocValue), 2U);
@@ -666,7 +750,7 @@ TEST(DocumentEngineListTest, ListUndoRotate)
     {
         auto tx = engine.beginTransaction();
         for (std::size_t i = 0; i < 5; ++i) {
-            original[i] = tx.insert(ps.playlistList, assocValue, i, {
+            original[i] = insertListItem(tx, ps.playlistList, assocValue, i, {
                 ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(static_cast<std::int64_t>(i) * 10))},
             });
         }
@@ -710,7 +794,7 @@ TEST(DocumentEngineListTest, ListMoveViaAssociationUpdate)
     ItemId element = 0;
     {
         auto tx = engine.beginTransaction();
-        element = tx.insert(ps.playlistList, assoc1, 0, {
+        element = insertListItem(tx, ps.playlistList, assoc1, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
         tx.commit();
@@ -745,7 +829,7 @@ TEST(DocumentEngineListTest, ListInsertWithNullAssociationCreatesUnattachedItem)
     CommitResult result;
     {
         auto tx = engine.beginTransaction();
-        element = tx.insert(ps.playlistList, Value::null(), 0, {
+        element = insertListItem(tx, ps.playlistList, Value::null(), 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
         result = tx.commit();
@@ -781,7 +865,7 @@ TEST(DocumentEngineListTest, ListNullAssociationInsertRequiresZeroIndex)
 
     auto tx = engine.beginTransaction();
     EXPECT_THROW(
-        tx.insert(ps.playlistList, Value::null(), 1, {
+        insertListItem(tx, ps.playlistList, Value::null(), 1, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         }),
         ConstraintError);
@@ -797,7 +881,7 @@ TEST(DocumentEngineListTest, ListAttachAndDetachUnattachedItem)
     ItemId element = 0;
     {
         auto tx = engine.beginTransaction();
-        element = tx.insert(ps.playlistList, Value::null(), 0, {
+        element = insertListItem(tx, ps.playlistList, Value::null(), 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
         tx.commit();
@@ -838,7 +922,7 @@ TEST(DocumentEngineListTest, ListUndoRedoNullAssociationInsert)
     ItemId element = 0;
     {
         auto tx = engine.beginTransaction();
-        element = tx.insert(ps.playlistList, Value::null(), 0, {
+        element = insertListItem(tx, ps.playlistList, Value::null(), 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
         tx.commit();
@@ -865,7 +949,7 @@ TEST(DocumentEngineListTest, ListNullAssociationSurvivesSnapshotAndChangeSetRepl
     CommitResult result;
     {
         auto tx = engine.beginTransaction();
-        element = tx.insert(ps.playlistList, Value::null(), 0, {
+        element = insertListItem(tx, ps.playlistList, Value::null(), 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
         result = tx.commit();
@@ -895,7 +979,7 @@ TEST(DocumentEngineListTest, ListInsertChangesetKind)
     CommitResult result;
     {
         auto tx = engine.beginTransaction();
-        tx.insert(ps.playlistList, assocValue, 0, {
+        insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
         result = tx.commit();
@@ -926,7 +1010,7 @@ TEST(DocumentEngineListTest, ListRemoveAtChangesetKind)
     // Insert first so there is something to remove.
     {
         auto tx = engine.beginTransaction();
-        tx.insert(ps.playlistList, assocValue, 0, {
+        insertListItem(tx, ps.playlistList, assocValue, 0, {
             ColumnValue {.column = ps.playlistPosition, .value = Value(static_cast<std::int64_t>(10))},
         });
         tx.commit();
@@ -935,7 +1019,7 @@ TEST(DocumentEngineListTest, ListRemoveAtChangesetKind)
     CommitResult result;
     {
         auto tx = engine.beginTransaction();
-        tx.removeAt(ps.playlistList, assocValue, 0);
+        tx.removeAt(ps.playlistList, assocValue, 0, 1);
         result = tx.commit();
     }
 

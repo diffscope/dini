@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <dini/engine.h>
@@ -63,6 +64,18 @@ ColumnDefinition uint64Column(const char *debugName, IndexKind index = IndexKind
 Value idValue(ItemId id)
 {
     return Value(static_cast<std::uint64_t>(id));
+}
+
+ItemId insertListItem(Transaction &transaction,
+                      ListHandle list,
+                      Value associationValue,
+                      std::size_t index,
+                      std::vector<ColumnValue> values)
+{
+    return transaction.insert(list,
+                              std::move(associationValue),
+                              index,
+                              {{.values = std::move(values)}}).front();
 }
 
 struct TestContext {
@@ -243,19 +256,19 @@ TestContext createSeededEngine()
         }, ctx.typeBVariant));
 
         // Ranking list entries: 3 under group 0, 2 under group 1
-        txn.insert(ctx.rankingList, idValue(ctx.groupIds[0]), 0, {
+        insertListItem(txn, ctx.rankingList, idValue(ctx.groupIds[0]), 0, {
             ColumnValue {.column = ctx.rankingRank, .value = Value(std::int64_t {1})},
         });
-        txn.insert(ctx.rankingList, idValue(ctx.groupIds[0]), 1, {
+        insertListItem(txn, ctx.rankingList, idValue(ctx.groupIds[0]), 1, {
             ColumnValue {.column = ctx.rankingRank, .value = Value(std::int64_t {2})},
         });
-        txn.insert(ctx.rankingList, idValue(ctx.groupIds[0]), 2, {
+        insertListItem(txn, ctx.rankingList, idValue(ctx.groupIds[0]), 2, {
             ColumnValue {.column = ctx.rankingRank, .value = Value(std::int64_t {3})},
         });
-        txn.insert(ctx.rankingList, idValue(ctx.groupIds[1]), 0, {
+        insertListItem(txn, ctx.rankingList, idValue(ctx.groupIds[1]), 0, {
             ColumnValue {.column = ctx.rankingRank, .value = Value(std::int64_t {10})},
         });
-        txn.insert(ctx.rankingList, idValue(ctx.groupIds[1]), 1, {
+        insertListItem(txn, ctx.rankingList, idValue(ctx.groupIds[1]), 1, {
             ColumnValue {.column = ctx.rankingRank, .value = Value(std::int64_t {20})},
         });
 
@@ -1432,5 +1445,3 @@ TEST(DocumentEngineQueryTest, QueryLiveViewSeesRollback)
 }
 
 } // namespace
-
-

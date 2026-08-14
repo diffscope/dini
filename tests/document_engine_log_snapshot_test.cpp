@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <dini/engine.h>
@@ -51,6 +52,18 @@ ColumnDefinition uint64Column(const char *debugName, IndexKind index = IndexKind
 Value idValue(ItemId id)
 {
     return Value(static_cast<std::uint64_t>(id));
+}
+
+ItemId insertListItem(Transaction &transaction,
+                      ListHandle list,
+                      Value associationValue,
+                      std::size_t index,
+                      std::vector<ColumnValue> values)
+{
+    return transaction.insert(list,
+                              std::move(associationValue),
+                              index,
+                              {{.values = std::move(values)}}).front();
 }
 
 // ---------------------------------------------------------------------------
@@ -176,11 +189,11 @@ SeedResult seedEngine(DocumentEngine &engine, const TestSchema &s)
 
         auto assocValue = idValue(r.groupId);
 
-        r.listElem1Id = txn.insert(s.itemList, assocValue, 0, {
+        r.listElem1Id = insertListItem(txn, s.itemList, assocValue, 0, {
             ColumnValue{.column = s.listRank, .value = Value(std::int64_t{10})},
         });
 
-        r.listElem2Id = txn.insert(s.itemList, assocValue, 1, {
+        r.listElem2Id = insertListItem(txn, s.itemList, assocValue, 1, {
             ColumnValue{.column = s.listRank, .value = Value(std::int64_t{20})},
         });
 
@@ -625,13 +638,13 @@ TEST(DocumentEngineSnapshotSerializationTest, SnapshotPreservesListOrder)
         });
 
         auto av = idValue(groupId);
-        elem0 = txn.insert(s.itemList, av, 0, {
+        elem0 = insertListItem(txn, s.itemList, av, 0, {
             ColumnValue{.column = s.listRank, .value = Value(std::int64_t{1})},
         });
-        elem1 = txn.insert(s.itemList, av, 1, {
+        elem1 = insertListItem(txn, s.itemList, av, 1, {
             ColumnValue{.column = s.listRank, .value = Value(std::int64_t{4})},
         });
-        elem2 = txn.insert(s.itemList, av, 2, {
+        elem2 = insertListItem(txn, s.itemList, av, 2, {
             ColumnValue{.column = s.listRank, .value = Value(std::int64_t{9})},
         });
 
