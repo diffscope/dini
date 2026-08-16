@@ -314,7 +314,7 @@ View &View::operator=(View &&other) noexcept = default;
 
 View View::filter(const FilterExpression &expression) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     const auto schema = impl.schema;
     const auto containerId = impl.containerId;
     if (containerId) {
@@ -336,7 +336,7 @@ View View::filter(const FilterExpression &expression) const
 
 View View::sort(std::vector<SortKey> keys) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     const auto schema = impl.schema;
     const auto containerId = impl.containerId;
     if (containerId) {
@@ -355,7 +355,7 @@ View View::sort(std::vector<SortKey> keys) const
 
 View View::limit(std::size_t count) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     auto data = SharedDataPointer<View::Impl>(new View::Impl(impl));
     data.data()->_decl = nullptr;
     data.data()->limit = data.constData()->limit
@@ -366,7 +366,7 @@ View View::limit(std::size_t count) const
 
 View View::offset(std::size_t count) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     auto data = SharedDataPointer<View::Impl>(new View::Impl(impl));
     data.data()->_decl = nullptr;
     data.data()->offset += count;
@@ -375,7 +375,7 @@ View View::offset(std::size_t count) const
 
 AggregationView View::aggregate(const AggregationSpec &spec) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     const auto schema = impl.schema;
     const auto containerId = impl.containerId;
     if (containerId) {
@@ -445,7 +445,7 @@ AggregationView View::aggregate(const AggregationSpec &spec) const
 
 std::vector<ItemSnapshot> View::toVector() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (impl.streamer) {
         std::vector<ItemSnapshot> items;
         impl.streamer([&](const ItemSnapshot &item) {
@@ -472,7 +472,7 @@ std::vector<ItemSnapshot> View::toVector() const
 
 void View::forEach(const std::function<void(const ItemSnapshot &)> &visitor) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (impl.streamer) {
         impl.streamer([&](const ItemSnapshot &item) {
             visitor(item);
@@ -487,7 +487,7 @@ void View::forEach(const std::function<void(const ItemSnapshot &)> &visitor) con
 
 std::size_t View::count() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (impl.counter) {
         if (auto indexed = impl.counter(impl.offset, impl.limit)) {
             return *indexed;
@@ -506,7 +506,7 @@ std::size_t View::count() const
 
 bool View::empty() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (impl.streamer) {
         bool emptyResult = true;
         impl.streamer([&](const ItemSnapshot &) {
@@ -530,7 +530,7 @@ AggregationView &AggregationView::operator=(AggregationView &&other) noexcept = 
 
 std::vector<AggregationResult> AggregationView::toVector() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.evaluator ? impl.evaluator() : std::vector<AggregationResult> {};
 }
 

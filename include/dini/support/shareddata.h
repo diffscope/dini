@@ -274,7 +274,7 @@ private:
 
 } // namespace dini
 
-namespace stdc::pimpl::_private_ {
+namespace stdc::pimpl::detail {
 
 template <class T, class T1 = T>
 inline const T *get_impl_helper(const dini::SharedDataPointer<T1> &data)
@@ -288,6 +288,6 @@ inline T *get_impl_helper(dini::SharedDataPointer<T1> &data)
     return static_cast<T *>(data.data());
 }
 
-} // namespace stdc::pimpl::_private_
+} // namespace stdc::pimpl::detail
 
 #endif // DINI_SUPPORT_SHAREDDATA_H

@@ -52,13 +52,13 @@ FieldRef &FieldRef::operator=(FieldRef &&other) noexcept = default;
 
 FieldKind FieldRef::kind() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.kind;
 }
 
 ColumnHandle FieldRef::column() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (impl.kind != FieldKind::Column) {
         throw QueryError("field reference is not a column");
     }
@@ -67,7 +67,7 @@ ColumnHandle FieldRef::column() const
 
 RelationHandle FieldRef::relation() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (impl.kind != FieldKind::Parent) {
         throw QueryError("field reference is not a relation");
     }
@@ -76,7 +76,7 @@ RelationHandle FieldRef::relation() const
 
 VariantHandle FieldRef::variant() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (impl.kind != FieldKind::Variant) {
         throw QueryError("field reference is not a variant");
     }
@@ -98,19 +98,19 @@ Filter &Filter::operator=(Filter &&other) noexcept = default;
 
 const FieldRef &Filter::field() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.field;
 }
 
 ComparisonOperator Filter::comparisonOperator() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.comparisonOperator;
 }
 
 const Value &Filter::value() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.value;
 }
 
@@ -118,7 +118,7 @@ FilterExpression::FilterExpression() : _impl(new Impl(this)) {}
 
 FilterExpression::FilterExpression(Filter filter) : _impl(new Impl(this))
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.empty = false;
     impl.filter = std::move(filter);
 }
@@ -161,7 +161,7 @@ FilterExpression FilterExpression::negate(FilterExpression child)
 
 bool FilterExpression::isEmpty() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.empty;
 }
 

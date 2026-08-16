@@ -135,13 +135,13 @@ ChangeOperation &ChangeOperation::operator=(ChangeOperation &&other) noexcept = 
 
 ChangeOperationKind ChangeOperation::kind() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return operationKind(impl.payload);
 }
 
 const ChangeOperation::Payload &ChangeOperation::payload() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.payload;
 }
 
@@ -165,31 +165,31 @@ ChangeSet &ChangeSet::operator=(ChangeSet &&other) noexcept = default;
 
 bool ChangeSet::empty() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.operations.empty();
 }
 
 const std::vector<ChangeOperation> &ChangeSet::operations() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.operations;
 }
 
 const std::vector<DerivedChangeLink> &ChangeSet::derivedLinks() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.derivedLinks;
 }
 
 void ChangeSet::append(ChangeOperation operation)
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.operations.push_back(std::move(operation));
 }
 
 void ChangeSet::addDerivedLink(DerivedChangeLink link)
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (link.sourceOperation >= impl.operations.size() || link.derivedOperation >= impl.operations.size()) {
         throw std::out_of_range("derived change link operation index is outside the change set");
     }
@@ -198,7 +198,7 @@ void ChangeSet::addDerivedLink(DerivedChangeLink link)
 
 ChangeSet ChangeSet::invert() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
 
     std::vector<ChangeOperation> invertedOperations;
     invertedOperations.reserve(impl.operations.size());
@@ -333,13 +333,13 @@ UndoStep &UndoStep::operator=(UndoStep &&other) noexcept = default;
 
 const ChangeSet &UndoStep::changeSet() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.changeSet;
 }
 
 const std::string &UndoStep::label() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.label;
 }
 

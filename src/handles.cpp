@@ -27,7 +27,7 @@ TableHandle::TableHandle() noexcept : _impl(new Impl(this)) {}
 
 TableHandle::TableHandle(SchemaId schemaId, ContainerId containerId, std::string debugName) : _impl(new Impl(this))
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.schemaId = schemaId;
     impl.containerId = containerId;
     impl.debugName = std::move(debugName);
@@ -41,25 +41,25 @@ TableHandle &TableHandle::operator=(TableHandle &&other) noexcept = default;
 
 bool TableHandle::isValid() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return validContainerHandle(impl);
 }
 
 SchemaId TableHandle::schemaId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.schemaId;
 }
 
 ContainerId TableHandle::containerId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.containerId;
 }
 
 const std::string &TableHandle::debugName() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return debugNameOf(impl);
 }
 
@@ -73,7 +73,7 @@ ListHandle::ListHandle() noexcept : _impl(new Impl(this)) {}
 
 ListHandle::ListHandle(SchemaId schemaId, ContainerId containerId, std::string debugName) : _impl(new Impl(this))
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.schemaId = schemaId;
     impl.containerId = containerId;
     impl.debugName = std::move(debugName);
@@ -87,25 +87,25 @@ ListHandle &ListHandle::operator=(ListHandle &&other) noexcept = default;
 
 bool ListHandle::isValid() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return validContainerHandle(impl);
 }
 
 SchemaId ListHandle::schemaId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.schemaId;
 }
 
 ContainerId ListHandle::containerId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.containerId;
 }
 
 const std::string &ListHandle::debugName() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return debugNameOf(impl);
 }
 
@@ -120,7 +120,7 @@ ColumnHandle::ColumnHandle() noexcept : _impl(new Impl(this)) {}
 ColumnHandle::ColumnHandle(SchemaId schemaId, ContainerId containerId, ColumnId columnId, std::string debugName)
     : _impl(new Impl(this))
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.schemaId = schemaId;
     impl.containerId = containerId;
     impl.columnId = columnId;
@@ -135,31 +135,31 @@ ColumnHandle &ColumnHandle::operator=(ColumnHandle &&other) noexcept = default;
 
 bool ColumnHandle::isValid() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return validContainerHandle(impl) && impl.columnId != 0;
 }
 
 SchemaId ColumnHandle::schemaId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.schemaId;
 }
 
 ContainerId ColumnHandle::containerId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.containerId;
 }
 
 ColumnId ColumnHandle::columnId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.columnId;
 }
 
 const std::string &ColumnHandle::debugName() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return debugNameOf(impl);
 }
 
@@ -178,7 +178,7 @@ RelationHandle::RelationHandle(SchemaId schemaId,
                                std::string debugName)
     : _impl(new Impl(this))
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.schemaId = schemaId;
     impl.containerId = containerId;
     impl.relationId = relationId;
@@ -194,37 +194,37 @@ RelationHandle &RelationHandle::operator=(RelationHandle &&other) noexcept = def
 
 bool RelationHandle::isValid() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return validContainerHandle(impl) && impl.relationId != 0 && impl.column.isValid();
 }
 
 SchemaId RelationHandle::schemaId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.schemaId;
 }
 
 ContainerId RelationHandle::containerId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.containerId;
 }
 
 RelationId RelationHandle::relationId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.relationId;
 }
 
 ColumnHandle RelationHandle::column() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.column;
 }
 
 const std::string &RelationHandle::debugName() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return debugNameOf(impl);
 }
 
@@ -239,7 +239,7 @@ VariantHandle::VariantHandle() noexcept : _impl(new Impl(this)) {}
 VariantHandle::VariantHandle(SchemaId schemaId, ContainerId containerId, VariantId variantId, std::string debugName)
     : _impl(new Impl(this))
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.schemaId = schemaId;
     impl.containerId = containerId;
     impl.variantId = variantId;
@@ -254,31 +254,31 @@ VariantHandle &VariantHandle::operator=(VariantHandle &&other) noexcept = defaul
 
 bool VariantHandle::isValid() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return validContainerHandle(impl) && impl.variantId != 0;
 }
 
 SchemaId VariantHandle::schemaId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.schemaId;
 }
 
 ContainerId VariantHandle::containerId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.containerId;
 }
 
 VariantId VariantHandle::variantId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.variantId;
 }
 
 const std::string &VariantHandle::debugName() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return debugNameOf(impl);
 }
 
@@ -296,7 +296,7 @@ OrderedIndexHandle::OrderedIndexHandle(SchemaId schemaId,
                                        std::string debugName)
     : _impl(new Impl(this))
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.schemaId = schemaId;
     impl.containerId = containerId;
     impl.indexId = indexId;
@@ -311,31 +311,31 @@ OrderedIndexHandle &OrderedIndexHandle::operator=(OrderedIndexHandle &&other) no
 
 bool OrderedIndexHandle::isValid() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return validContainerHandle(impl) && impl.indexId != 0;
 }
 
 SchemaId OrderedIndexHandle::schemaId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.schemaId;
 }
 
 ContainerId OrderedIndexHandle::containerId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.containerId;
 }
 
 std::uint32_t OrderedIndexHandle::indexId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.indexId;
 }
 
 const std::string &OrderedIndexHandle::debugName() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return debugNameOf(impl);
 }
 
@@ -353,7 +353,7 @@ IntervalIndexHandle::IntervalIndexHandle(SchemaId schemaId,
                                          std::string debugName)
     : _impl(new Impl(this))
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     impl.schemaId = schemaId;
     impl.containerId = containerId;
     impl.indexId = indexId;
@@ -368,31 +368,31 @@ IntervalIndexHandle &IntervalIndexHandle::operator=(IntervalIndexHandle &&other)
 
 bool IntervalIndexHandle::isValid() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return validContainerHandle(impl) && impl.indexId != 0;
 }
 
 SchemaId IntervalIndexHandle::schemaId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.schemaId;
 }
 
 ContainerId IntervalIndexHandle::containerId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.containerId;
 }
 
 std::uint32_t IntervalIndexHandle::indexId() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.indexId;
 }
 
 const std::string &IntervalIndexHandle::debugName() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return debugNameOf(impl);
 }
 

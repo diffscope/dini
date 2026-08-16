@@ -46,7 +46,7 @@ Value Value::null()
 
 ValueType Value::type() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     switch (impl.storage.index()) {
         case 1:
             return ValueType::Bool;
@@ -102,7 +102,7 @@ const Value::Binary &Value::asBinary() const
 
 const Value::Storage &Value::storage() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.storage;
 }
 

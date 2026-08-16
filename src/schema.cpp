@@ -471,13 +471,13 @@ EngineSchema &EngineSchema::operator=(EngineSchema &&other) noexcept = default;
 
 bool EngineSchema::isValid() const noexcept
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     return impl.frozen && impl.schemaId != 0;
 }
 
 SchemaId EngineSchema::schemaId() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (!isValid()) {
         throw SchemaError("schema is invalid");
     }
@@ -486,7 +486,7 @@ SchemaId EngineSchema::schemaId() const
 
 ByteArray EngineSchema::serializeStructure() const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (!isValid()) {
         throw SchemaError("schema is invalid");
     }
@@ -501,34 +501,34 @@ bool EngineSchema::matchesSerializedStructure(const ByteArray &bytes) const
 ContainerInfo EngineSchema::tableInfo(TableHandle table) const
 {
     validate(table);
-    __stdc_impl_t;
+    stdc_impl_t;
     return findContainer(impl, table.containerId())->info;
 }
 
 ContainerInfo EngineSchema::listInfo(ListHandle list) const
 {
     validate(list);
-    __stdc_impl_t;
+    stdc_impl_t;
     return findContainer(impl, list.containerId())->info;
 }
 
 ColumnInfo EngineSchema::columnInfo(ColumnHandle column) const
 {
     validate(column);
-    __stdc_impl_t;
+    stdc_impl_t;
     return findColumn(impl, column.containerId(), column.columnId())->info;
 }
 
 RelationInfo EngineSchema::relationInfo(RelationHandle relation) const
 {
     validate(relation);
-    __stdc_impl_t;
+    stdc_impl_t;
     return findRelation(impl, relation.containerId(), relation.relationId())->info;
 }
 
 void EngineSchema::validate(TableHandle table) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     const auto *container = findContainer(impl, table.containerId());
     if (!isValid() || !table.isValid() || table.schemaId() != impl.schemaId || !container ||
         container->info.kind != ContainerKind::Table) {
@@ -538,7 +538,7 @@ void EngineSchema::validate(TableHandle table) const
 
 void EngineSchema::validate(ListHandle list) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     const auto *container = findContainer(impl, list.containerId());
     if (!isValid() || !list.isValid() || list.schemaId() != impl.schemaId || !container ||
         container->info.kind != ContainerKind::List) {
@@ -548,7 +548,7 @@ void EngineSchema::validate(ListHandle list) const
 
 void EngineSchema::validate(ColumnHandle column) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (!isValid() || !column.isValid() || column.schemaId() != impl.schemaId ||
         !findColumn(impl, column.containerId(), column.columnId())) {
         throw HandleError("invalid column handle");
@@ -557,7 +557,7 @@ void EngineSchema::validate(ColumnHandle column) const
 
 void EngineSchema::validate(RelationHandle relation) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (!isValid() || !relation.isValid() || relation.schemaId() != impl.schemaId ||
         !findRelation(impl, relation.containerId(), relation.relationId())) {
         throw HandleError("invalid relation handle");
@@ -566,7 +566,7 @@ void EngineSchema::validate(RelationHandle relation) const
 
 void EngineSchema::validate(OrderedIndexHandle index) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (!isValid() || !index.isValid() || index.schemaId() != impl.schemaId ||
         !findOrderedIndex(impl, index.containerId(), index.indexId())) {
         throw HandleError("invalid ordered index handle");
@@ -575,7 +575,7 @@ void EngineSchema::validate(OrderedIndexHandle index) const
 
 void EngineSchema::validate(IntervalIndexHandle index) const
 {
-    __stdc_impl_t;
+    stdc_impl_t;
     if (!isValid() || !index.isValid() || index.schemaId() != impl.schemaId ||
         !findIntervalIndex(impl, index.containerId(), index.indexId())) {
         throw HandleError("invalid interval index handle");
