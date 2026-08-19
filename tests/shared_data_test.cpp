@@ -344,13 +344,13 @@ TEST(SharedDataTest, GetImplHelperConstAndMutable) {
     dini::SharedDataPointer<DerivedData> ptr(derived);
     const dini::SharedDataPointer<DerivedData> &cptr = ptr;
 
-    const TestData *ctd = stdc::pimpl::_private_::get_impl_helper<TestData>(cptr);
+    const TestData *ctd = stdc::pimpl::detail::get_impl_helper<TestData>(cptr);
     EXPECT_EQ(ctd, derived);
     EXPECT_EQ(ctd->value, 10);
 
     // Mutable helper returns pointer to the (possibly detached) block.
     // Here refCount == 1 so no detach occurs.
-    TestData *td = stdc::pimpl::_private_::get_impl_helper<TestData>(ptr);
+    TestData *td = stdc::pimpl::detail::get_impl_helper<TestData>(ptr);
     EXPECT_EQ(td, derived);
     td->value = 42;
     EXPECT_EQ(derived->value, 42);
@@ -363,7 +363,7 @@ TEST(SharedDataTest, GetImplHelperMutableDetachesWhenShared) {
     EXPECT_EQ(derived->refCount(), 2u);
 
     // Mutable get_impl_helper calls data() which detaches.
-    TestData *td = stdc::pimpl::_private_::get_impl_helper<TestData>(ptr1);
+    TestData *td = stdc::pimpl::detail::get_impl_helper<TestData>(ptr1);
     EXPECT_NE(td, derived);                 // new copy
     EXPECT_EQ(td->refCount(), 1u);
     EXPECT_EQ(derived->refCount(), 1u);     // still owned by ptr2
