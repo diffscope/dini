@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -1028,6 +1029,93 @@ void OrderedRuntimeIndex::ordered(const OrderedIndexDefinitionRecord &definition
     }
 }
 
+void OrderedRuntimeIndex::orderedRanges(const OrderedIndexDefinitionRecord &definition,
+                                        const std::vector<Value> &groupKey,
+                                        const std::vector<RuntimeOrderedRange> &ranges,
+                                        bool descending,
+                                        const std::function<bool(ItemId)> &visitor) const
+{
+    if (definition.orderBy.size() != 1) {
+        return;
+    }
+    auto groupValues = keyValuesFromValues(groupKey);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return;
+    }
+    auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    if (groupIt == _groups.end()) {
+        return;
+    }
+
+    const auto boundaryEntry = [](const Value &value, ItemId id) {
+        return OrderedEntry {
+            .orderValues = {ComparableValueKey(value)},
+            .id = id,
+        };
+    };
+    const auto visitRange = [&](const RuntimeOrderedRange &range, bool reverse) {
+        auto first = groupIt->second.begin();
+        if (range.lower.has_value()) {
+            const auto boundary = boundaryEntry(*range.lower,
+                                                range.lowerInclusive ? std::numeric_limits<ItemId>::lowest()
+                                                                     : std::numeric_limits<ItemId>::max());
+            first = range.lowerInclusive ? groupIt->second.lower_bound(boundary)
+                                         : groupIt->second.upper_bound(boundary);
+        }
+
+        auto last = groupIt->second.end();
+        if (range.upper.has_value()) {
+            const auto boundary = boundaryEntry(*range.upper,
+                                                range.upperInclusive ? std::numeric_limits<ItemId>::max()
+                                                                     : std::numeric_limits<ItemId>::lowest());
+            last = range.upperInclusive ? groupIt->second.upper_bound(boundary)
+                                        : groupIt->second.lower_bound(boundary);
+        }
+        if (first == last) {
+            return true;
+        }
+        if (reverse) {
+            for (auto it = std::make_reverse_iterator(last); it != std::make_reverse_iterator(first); ++it) {
+                if (!visitor(it->id)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        for (auto it = first; it != last; ++it) {
+            if (!visitor(it->id)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (descending) {
+        for (auto it = ranges.rbegin(); it != ranges.rend(); ++it) {
+            if (!visitRange(*it, true)) {
+                return;
+            }
+        }
+        return;
+    }
+    for (const auto &range : ranges) {
+        if (!visitRange(range, false)) {
+            return;
+        }
+    }
+}
+
+std::size_t OrderedRuntimeIndex::groupSize(const OrderedIndexDefinitionRecord &definition,
+                                           const std::vector<Value> &groupKey) const
+{
+    auto groupValues = keyValuesFromValues(groupKey);
+    if (groupValues.size() != definition.groupBy.size()) {
+        return 0;
+    }
+    const auto groupIt = _groups.find(GroupKey {std::move(groupValues)});
+    return groupIt == _groups.end() ? 0 : groupIt->second.size();
+}
+
 bool operator<(const IntervalRuntimeIndex::GroupKey &lhs, const IntervalRuntimeIndex::GroupKey &rhs)
 {
     return std::lexicographical_compare(lhs.values.begin(), lhs.values.end(), rhs.values.begin(), rhs.values.end());
@@ -1578,6 +1666,26 @@ void RuntimeIndexStore::orderedIndex(const OrderedIndexDefinitionRecord &definit
         return;
     }
     it->second.ordered(definition, groupKey, descending, visitor);
+}
+
+void RuntimeIndexStore::orderedIndexRanges(const OrderedIndexDefinitionRecord &definition,
+                                           const std::vector<Value> &groupKey,
+                                           const std::vector<RuntimeOrderedRange> &ranges,
+                                           bool descending,
+                                           const std::function<bool(ItemId)> &visitor) const
+{
+    auto it = _orderedIndexes.find({definition.handle.containerId(), definition.handle.indexId()});
+    if (it == _orderedIndexes.end()) {
+        return;
+    }
+    it->second.orderedRanges(definition, groupKey, ranges, descending, visitor);
+}
+
+std::size_t RuntimeIndexStore::orderedIndexGroupSize(const OrderedIndexDefinitionRecord &definition,
+                                                     const std::vector<Value> &groupKey) const
+{
+    auto it = _orderedIndexes.find({definition.handle.containerId(), definition.handle.indexId()});
+    return it == _orderedIndexes.end() ? 0 : it->second.groupSize(definition, groupKey);
 }
 
 std::optional<ItemId> RuntimeIndexStore::previous(const OrderedIndexDefinitionRecord &definition,

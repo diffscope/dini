@@ -2130,6 +2130,17 @@ namespace dini {
         return !columnFor(schemaDefinition, column).info.variantSpecific;
     }
 
+    bool columnIsNullable(const ColumnDefinitionRecord &column)
+    {
+        if (column.info.computed) {
+            return column.computedDefinition.nullable;
+        }
+        if (column.info.variantSpecific) {
+            return column.variantDefinition.nullable;
+        }
+        return column.normalDefinition.nullable;
+    }
+
     FilterExpression normalizeNegation(const SchemaDefinitionData &schemaDefinition,
                                        ContainerId containerId,
                                        const FilterExpression &expression,
@@ -2428,16 +2439,338 @@ namespace dini {
         return values;
     }
 
+    constexpr std::size_t orderedRangePlanBudget = 8;
+
+    bool orderedRangeIsEmpty(const RuntimeOrderedRange &range)
+    {
+        if (!range.lower || !range.upper) {
+            return false;
+        }
+        const auto comparison = compareValues(*range.lower, *range.upper);
+        return comparison > 0 ||
+               (comparison == 0 && (!range.lowerInclusive || !range.upperInclusive));
+    }
+
+    std::vector<RuntimeOrderedRange> orderedRangeSetForFilter(const Filter &filter)
+    {
+        RuntimeOrderedRange lower;
+        RuntimeOrderedRange upper;
+        switch (filter.comparisonOperator()) {
+            case ComparisonOperator::Equal:
+                return {RuntimeOrderedRange {
+                    .lower = filter.value(),
+                    .lowerInclusive = true,
+                    .upper = filter.value(),
+                    .upperInclusive = true,
+                }};
+            case ComparisonOperator::NotEqual:
+                lower.upper = filter.value();
+                upper.lower = filter.value();
+                return {std::move(lower), std::move(upper)};
+            case ComparisonOperator::Greater:
+                lower.lower = filter.value();
+                return {std::move(lower)};
+            case ComparisonOperator::GreaterOrEqual:
+                lower.lower = filter.value();
+                lower.lowerInclusive = true;
+                return {std::move(lower)};
+            case ComparisonOperator::Less:
+                upper.upper = filter.value();
+                return {std::move(upper)};
+            case ComparisonOperator::LessOrEqual:
+                upper.upper = filter.value();
+                upper.upperInclusive = true;
+                return {std::move(upper)};
+        }
+        return {};
+    }
+
+    RuntimeOrderedRange intersectOrderedRanges(const RuntimeOrderedRange &lhs,
+                                                const RuntimeOrderedRange &rhs)
+    {
+        RuntimeOrderedRange result;
+        if (!lhs.lower) {
+            result.lower = rhs.lower;
+            result.lowerInclusive = rhs.lowerInclusive;
+        } else if (!rhs.lower) {
+            result.lower = lhs.lower;
+            result.lowerInclusive = lhs.lowerInclusive;
+        } else {
+            const auto comparison = compareValues(*lhs.lower, *rhs.lower);
+            result.lower = comparison >= 0 ? lhs.lower : rhs.lower;
+            result.lowerInclusive = comparison > 0 ? lhs.lowerInclusive
+                                                    : comparison < 0 ? rhs.lowerInclusive
+                                                                     : lhs.lowerInclusive && rhs.lowerInclusive;
+        }
+
+        if (!lhs.upper) {
+            result.upper = rhs.upper;
+            result.upperInclusive = rhs.upperInclusive;
+        } else if (!rhs.upper) {
+            result.upper = lhs.upper;
+            result.upperInclusive = lhs.upperInclusive;
+        } else {
+            const auto comparison = compareValues(*lhs.upper, *rhs.upper);
+            result.upper = comparison <= 0 ? lhs.upper : rhs.upper;
+            result.upperInclusive = comparison < 0 ? lhs.upperInclusive
+                                                    : comparison > 0 ? rhs.upperInclusive
+                                                                     : lhs.upperInclusive && rhs.upperInclusive;
+        }
+        return result;
+    }
+
+    std::optional<std::vector<RuntimeOrderedRange>> intersectOrderedRangeSets(
+        const std::vector<RuntimeOrderedRange> &lhs,
+        const std::vector<RuntimeOrderedRange> &rhs)
+    {
+        std::vector<RuntimeOrderedRange> result;
+        for (const auto &left : lhs) {
+            for (const auto &right : rhs) {
+                auto intersection = intersectOrderedRanges(left, right);
+                if (!orderedRangeIsEmpty(intersection)) {
+                    result.push_back(std::move(intersection));
+                    if (result.size() > orderedRangePlanBudget) {
+                        return std::nullopt;
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    bool orderedRangesOverlapOrTouch(const RuntimeOrderedRange &lhs,
+                                     const RuntimeOrderedRange &rhs)
+    {
+        if (!lhs.upper || !rhs.lower) {
+            return true;
+        }
+        const auto comparison = compareValues(*lhs.upper, *rhs.lower);
+        return comparison > 0 ||
+               (comparison == 0 && (lhs.upperInclusive || rhs.lowerInclusive));
+    }
+
+    void extendOrderedRange(RuntimeOrderedRange &target, const RuntimeOrderedRange &source)
+    {
+        if (!target.upper || !source.upper) {
+            target.upper.reset();
+            target.upperInclusive = false;
+            return;
+        }
+        const auto comparison = compareValues(*target.upper, *source.upper);
+        if (comparison < 0) {
+            target.upper = source.upper;
+            target.upperInclusive = source.upperInclusive;
+        } else if (comparison == 0) {
+            target.upperInclusive = target.upperInclusive || source.upperInclusive;
+        }
+    }
+
+    std::optional<std::vector<RuntimeOrderedRange>> unionOrderedRangeSets(
+        std::vector<RuntimeOrderedRange> lhs,
+        const std::vector<RuntimeOrderedRange> &rhs)
+    {
+        lhs.insert(lhs.end(), rhs.begin(), rhs.end());
+        lhs.erase(std::remove_if(lhs.begin(), lhs.end(), orderedRangeIsEmpty), lhs.end());
+        std::sort(lhs.begin(), lhs.end(), [](const auto &left, const auto &right) {
+            if (!left.lower) {
+                return right.lower.has_value();
+            }
+            if (!right.lower) {
+                return false;
+            }
+            const auto comparison = compareValues(*left.lower, *right.lower);
+            return comparison < 0 ||
+                   (comparison == 0 && left.lowerInclusive && !right.lowerInclusive);
+        });
+
+        std::vector<RuntimeOrderedRange> result;
+        for (const auto &range : lhs) {
+            if (result.empty() || !orderedRangesOverlapOrTouch(result.back(), range)) {
+                result.push_back(range);
+                if (result.size() > orderedRangePlanBudget) {
+                    return std::nullopt;
+                }
+                continue;
+            }
+            extendOrderedRange(result.back(), range);
+        }
+        return result;
+    }
+
+    bool filterTargetsOrderedColumn(ContainerId containerId,
+                                    const Filter &filter,
+                                    ColumnId orderedColumnId)
+    {
+        const auto columnId = columnIdForField(containerId, filter.field());
+        return columnId && *columnId == orderedColumnId;
+    }
+
+    bool filterCanUseOrderedRange(const Filter &filter)
+    {
+        return !filter.value().isNull() ||
+               filter.comparisonOperator() == ComparisonOperator::NotEqual;
+    }
+
+    bool expressionTargetsOrderedColumn(ContainerId containerId,
+                                        const FilterExpression &expression,
+                                        ColumnId orderedColumnId)
+    {
+        const auto &impl = filterExpressionImpl(expression);
+        if (impl.filter) {
+            return filterTargetsOrderedColumn(containerId, *impl.filter, orderedColumnId);
+        }
+        return std::any_of(impl.children.begin(), impl.children.end(), [&](const auto &child) {
+            return expressionTargetsOrderedColumn(containerId, child, orderedColumnId);
+        });
+    }
+
+    std::optional<std::vector<RuntimeOrderedRange>> simpleAndOrderedRangeSet(
+        ContainerId containerId,
+        const FilterExpression &expression,
+        ColumnId orderedColumnId)
+    {
+        const auto &impl = filterExpressionImpl(expression);
+        std::vector<const Filter *> filters;
+        if (impl.filter) {
+            if (!filterTargetsOrderedColumn(containerId, *impl.filter, orderedColumnId) ||
+                !filterCanUseOrderedRange(*impl.filter)) {
+                return std::nullopt;
+            }
+            filters.push_back(&*impl.filter);
+        } else {
+            if (impl.op != FilterOperator::And) {
+                return std::nullopt;
+            }
+            for (const auto &child : impl.children) {
+                const auto &childImpl = filterExpressionImpl(child);
+                if (childImpl.filter &&
+                    filterTargetsOrderedColumn(containerId, *childImpl.filter, orderedColumnId)) {
+                    if (!filterCanUseOrderedRange(*childImpl.filter)) {
+                        return std::nullopt;
+                    }
+                    filters.push_back(&*childImpl.filter);
+                } else if (expressionTargetsOrderedColumn(containerId, child, orderedColumnId)) {
+                    return std::nullopt;
+                }
+            }
+        }
+        if (filters.empty() || filters.size() > orderedRangePlanBudget) {
+            return std::nullopt;
+        }
+
+        std::vector<RuntimeOrderedRange> result {RuntimeOrderedRange {}};
+        for (const auto *filter : filters) {
+            auto intersection = intersectOrderedRangeSets(result, orderedRangeSetForFilter(*filter));
+            if (!intersection) {
+                return std::nullopt;
+            }
+            result = std::move(*intersection);
+        }
+        return result;
+    }
+
+    enum class OrderedRangeExtractionStatus {
+        NoRange,
+        Range,
+        Unsupported,
+    };
+
+    struct OrderedRangeExtraction {
+        OrderedRangeExtractionStatus status = OrderedRangeExtractionStatus::NoRange;
+        std::vector<RuntimeOrderedRange> ranges;
+    };
+
+    OrderedRangeExtraction extractOrderedRangeSet(ContainerId containerId,
+                                                  const FilterExpression &expression,
+                                                  ColumnId orderedColumnId,
+                                                  std::size_t &comparisonCount,
+                                                  bool allowResidualAnd)
+    {
+        const auto &impl = filterExpressionImpl(expression);
+        if (impl.empty) {
+            return {};
+        }
+        if (impl.filter) {
+            if (!filterTargetsOrderedColumn(containerId, *impl.filter, orderedColumnId)) {
+                return allowResidualAnd ? OrderedRangeExtraction {}
+                                        : OrderedRangeExtraction {OrderedRangeExtractionStatus::Unsupported, {}};
+            }
+            if (!filterCanUseOrderedRange(*impl.filter)) {
+                return {OrderedRangeExtractionStatus::Unsupported, {}};
+            }
+            if (++comparisonCount > orderedRangePlanBudget) {
+                return {OrderedRangeExtractionStatus::Unsupported, {}};
+            }
+            return {OrderedRangeExtractionStatus::Range, orderedRangeSetForFilter(*impl.filter)};
+        }
+        if (impl.op != FilterOperator::And && impl.op != FilterOperator::Or) {
+            return {OrderedRangeExtractionStatus::Unsupported, {}};
+        }
+
+        const bool isAnd = impl.op == FilterOperator::And;
+        bool foundRange = false;
+        std::vector<RuntimeOrderedRange> accumulated = isAnd
+            ? std::vector<RuntimeOrderedRange> {RuntimeOrderedRange {}}
+            : std::vector<RuntimeOrderedRange> {};
+        for (const auto &child : impl.children) {
+            auto childResult = extractOrderedRangeSet(containerId,
+                                                      child,
+                                                      orderedColumnId,
+                                                      comparisonCount,
+                                                      isAnd && allowResidualAnd);
+            if (childResult.status == OrderedRangeExtractionStatus::Unsupported) {
+                return childResult;
+            }
+            if (childResult.status == OrderedRangeExtractionStatus::NoRange) {
+                if (isAnd && allowResidualAnd) {
+                    continue;
+                }
+                return {OrderedRangeExtractionStatus::Unsupported, {}};
+            }
+            foundRange = true;
+            auto combined = isAnd
+                ? intersectOrderedRangeSets(accumulated, childResult.ranges)
+                : unionOrderedRangeSets(std::move(accumulated), childResult.ranges);
+            if (!combined || combined->size() > orderedRangePlanBudget) {
+                return {OrderedRangeExtractionStatus::Unsupported, {}};
+            }
+            accumulated = std::move(*combined);
+        }
+        if (!foundRange) {
+            return {};
+        }
+        return {OrderedRangeExtractionStatus::Range, std::move(accumulated)};
+    }
+
+    std::optional<std::vector<RuntimeOrderedRange>> boundedOrderedRangeSet(
+        ContainerId containerId,
+        const FilterExpression &expression,
+        ColumnId orderedColumnId)
+    {
+        std::size_t comparisonCount = 0;
+        auto result = extractOrderedRangeSet(containerId,
+                                             expression,
+                                             orderedColumnId,
+                                             comparisonCount,
+                                             true);
+        if (result.status != OrderedRangeExtractionStatus::Range) {
+            return std::nullopt;
+        }
+        return std::move(result.ranges);
+    }
+
     bool sortMatchesOrderedIndex(ContainerId containerId,
                                  const std::vector<SortKey> &sortKeys,
                                  const OrderedIndexDefinitionRecord &index,
                                  bool &descending)
     {
-        if (sortKeys.empty() || sortKeys.size() != index.orderBy.size()) {
+        const auto orderedColumnCount = index.orderBy.size();
+        if (sortKeys.empty() ||
+            (sortKeys.size() != orderedColumnCount && sortKeys.size() != orderedColumnCount + 1)) {
             return false;
         }
         descending = sortKeys.front().direction == SortDirection::Descending;
-        for (std::size_t i = 0; i < sortKeys.size(); ++i) {
+        for (std::size_t i = 0; i < orderedColumnCount; ++i) {
             if ((sortKeys[i].direction == SortDirection::Descending) != descending) {
                 return false;
             }
@@ -2446,7 +2779,74 @@ namespace dini {
                 return false;
             }
         }
+        if (sortKeys.size() == orderedColumnCount + 1 &&
+            (sortKeys.back().field.kind() != FieldKind::Id ||
+             (sortKeys.back().direction == SortDirection::Descending) != descending)) {
+            return false;
+        }
         return true;
+    }
+
+    struct IntervalQueryPlan {
+        const IntervalIndexDefinitionRecord *index = nullptr;
+        std::vector<Value> groupKey;
+        Value start;
+        Value end;
+    };
+
+    std::optional<IntervalQueryPlan> intervalQueryPlanForExpression(
+        const SchemaDefinitionData &schemaDefinition,
+        ContainerId containerId,
+        const FilterExpression &expression)
+    {
+        const auto *container = findContainer(schemaDefinition, containerId);
+        if (!container || container->intervalIndexes.empty()) {
+            return std::nullopt;
+        }
+        const auto &impl = filterExpressionImpl(expression);
+        if (impl.empty || impl.op != FilterOperator::And) {
+            return std::nullopt;
+        }
+
+        std::map<ColumnId, Value> equalities;
+        if (!collectEqualityFilters(containerId, expression, equalities)) {
+            return std::nullopt;
+        }
+        for (const auto &index : container->intervalIndexes) {
+            auto groupKey = groupKeyFromEqualities(index.groupBy, equalities);
+            if (!groupKey) {
+                continue;
+            }
+
+            std::optional<Value> probeStart;
+            std::optional<Value> probeEnd;
+            for (const auto &child : impl.children) {
+                const auto &childImpl = filterExpressionImpl(child);
+                if (!childImpl.filter) {
+                    continue;
+                }
+                const auto columnId = columnIdForField(containerId, childImpl.filter->field());
+                if (!columnId) {
+                    continue;
+                }
+                if (*columnId == index.start.columnId() &&
+                    childImpl.filter->comparisonOperator() == ComparisonOperator::Less) {
+                    probeEnd = childImpl.filter->value();
+                } else if (*columnId == index.end.columnId() &&
+                           childImpl.filter->comparisonOperator() == ComparisonOperator::Greater) {
+                    probeStart = childImpl.filter->value();
+                }
+            }
+            if (probeStart && probeEnd) {
+                return IntervalQueryPlan {
+                    .index = &index,
+                    .groupKey = std::move(*groupKey),
+                    .start = std::move(*probeStart),
+                    .end = std::move(*probeEnd),
+                };
+            }
+        }
+        return std::nullopt;
     }
 
     struct OrderedQueryPlan {
@@ -2454,6 +2854,67 @@ namespace dini {
         std::vector<Value> groupKey;
         bool descending = false;
     };
+
+    struct OrderedRangePlan {
+        const OrderedIndexDefinitionRecord *index = nullptr;
+        std::vector<Value> groupKey;
+        bool descending = false;
+        std::vector<RuntimeOrderedRange> ranges;
+    };
+
+    std::optional<OrderedRangePlan> orderedRangePlanFor(const SchemaDefinitionData &schemaDefinition,
+                                                        ContainerId containerId,
+                                                        const QuerySpec &spec)
+    {
+        const auto *container = findContainer(schemaDefinition, containerId);
+        if (!container || spec.sortKeys.empty()) {
+            return std::nullopt;
+        }
+        if (intervalQueryPlanForExpression(schemaDefinition, containerId, spec.filter)) {
+            return std::nullopt;
+        }
+        std::map<ColumnId, Value> equalities;
+        if (!collectEqualityFilters(containerId, spec.filter, equalities)) {
+            return std::nullopt;
+        }
+
+        const auto tryIndexes = [&](bool simpleOnly) -> std::optional<OrderedRangePlan> {
+            for (const auto &index : container->orderedIndexes) {
+                if (index.orderBy.size() != 1 ||
+                    columnIsNullable(columnFor(schemaDefinition, index.orderBy.front())) ||
+                    !fieldAlwaysApplies(schemaDefinition,
+                                        containerId,
+                                        FieldRef::column(index.orderBy.front()))) {
+                    continue;
+                }
+                bool descending = false;
+                if (!sortMatchesOrderedIndex(containerId, spec.sortKeys, index, descending)) {
+                    continue;
+                }
+                auto groupKey = groupKeyFromEqualities(index.groupBy, equalities);
+                if (!groupKey) {
+                    continue;
+                }
+                auto ranges = simpleOnly
+                    ? simpleAndOrderedRangeSet(containerId, spec.filter, index.orderBy.front().columnId())
+                    : boundedOrderedRangeSet(containerId, spec.filter, index.orderBy.front().columnId());
+                if (!ranges) {
+                    continue;
+                }
+                return OrderedRangePlan {
+                    .index = &index,
+                    .groupKey = std::move(*groupKey),
+                    .descending = descending,
+                    .ranges = std::move(*ranges),
+                };
+            }
+            return std::nullopt;
+        };
+        if (auto plan = tryIndexes(true)) {
+            return plan;
+        }
+        return tryIndexes(false);
+    }
 
     std::optional<OrderedQueryPlan> orderedQueryPlanFor(const SchemaDefinitionData &schemaDefinition,
                                                         ContainerId containerId,
@@ -2489,50 +2950,11 @@ namespace dini {
                                                                     ContainerId containerId,
                                                                     const FilterExpression &expression)
     {
-        const auto *container = findContainer(schemaData(engine.schema), containerId);
-        if (!container || container->intervalIndexes.empty()) {
+        auto plan = intervalQueryPlanForExpression(schemaData(engine.schema), containerId, expression);
+        if (!plan) {
             return std::nullopt;
         }
-        const auto &impl = filterExpressionImpl(expression);
-        if (impl.empty || impl.op != FilterOperator::And) {
-            return std::nullopt;
-        }
-
-        std::map<ColumnId, Value> equalities;
-        if (!collectEqualityFilters(containerId, expression, equalities)) {
-            return std::nullopt;
-        }
-
-        for (const auto &index : container->intervalIndexes) {
-            auto groupKey = groupKeyFromEqualities(index.groupBy, equalities);
-            if (!groupKey) {
-                continue;
-            }
-
-            std::optional<Value> probeStart;
-            std::optional<Value> probeEnd;
-            for (const auto &child : impl.children) {
-                const auto &childImpl = filterExpressionImpl(child);
-                if (!childImpl.filter) {
-                    continue;
-                }
-                const auto columnId = columnIdForField(containerId, childImpl.filter->field());
-                if (!columnId) {
-                    continue;
-                }
-                if (*columnId == index.start.columnId() &&
-                    childImpl.filter->comparisonOperator() == ComparisonOperator::Less) {
-                    probeEnd = childImpl.filter->value();
-                } else if (*columnId == index.end.columnId() &&
-                           childImpl.filter->comparisonOperator() == ComparisonOperator::Greater) {
-                    probeStart = childImpl.filter->value();
-                }
-            }
-            if (probeStart && probeEnd) {
-                return engine.indexes.queryInterval(index, *groupKey, *probeStart, *probeEnd);
-            }
-        }
-        return std::nullopt;
+        return engine.indexes.queryInterval(*plan->index, plan->groupKey, plan->start, plan->end);
     }
 
     std::optional<std::set<ItemId>> indexedCandidatesForFilter(const DocumentEngine::Impl &engine,
@@ -2662,7 +3084,9 @@ namespace dini {
                              std::size_t offset = 0,
                              std::optional<std::size_t> limit = std::nullopt)
     {
-        const auto candidates = indexedCandidatesForExpression(engine, containerId, spec.filter);
+        if (limit && *limit == 0) {
+            return;
+        }
         std::size_t skipped = 0;
         std::size_t emitted = 0;
         auto emit = [&](const ItemSnapshot &snapshot) {
@@ -2690,18 +3114,65 @@ namespace dini {
             return emit(itemIt->second.snapshot);
         };
 
+        std::optional<OrderedQueryPlan> orderedPlan;
         if (!useListDefaultOrder) {
-            if (auto orderedPlan = orderedQueryPlanFor(schemaData(engine.schema), containerId, spec)) {
+            if (auto rangePlan = orderedRangePlanFor(schemaData(engine.schema), containerId, spec)) {
                 bool keepGoing = true;
-                engine.indexes.orderedIndex(*orderedPlan->index, orderedPlan->groupKey, orderedPlan->descending, [&](ItemId id) {
-                    if (candidates && candidates->find(id) == candidates->end()) {
-                        return true;
-                    }
-                    keepGoing = emitId(id);
-                    return keepGoing;
-                });
+                engine.indexes.orderedIndexRanges(*rangePlan->index,
+                                                  rangePlan->groupKey,
+                                                  rangePlan->ranges,
+                                                  rangePlan->descending,
+                                                  [&](ItemId id) {
+                                                      keepGoing = emitId(id);
+                                                      return keepGoing;
+                                                  });
                 return;
             }
+            orderedPlan = orderedQueryPlanFor(schemaData(engine.schema), containerId, spec);
+        }
+
+        auto candidates = intervalCandidatesForExpression(engine, containerId, spec.filter);
+        const bool usesIntervalCandidates = candidates.has_value();
+        if (!candidates) {
+            candidates = indexedCandidatesForExpression(engine, containerId, spec.filter);
+        }
+
+        if (orderedPlan && usesIntervalCandidates) {
+            const auto groupSize = engine.indexes.orderedIndexGroupSize(*orderedPlan->index,
+                                                                        orderedPlan->groupKey);
+            if (candidates->size() <= groupSize / 2) {
+                std::vector<ItemSnapshot> materialized;
+                materialized.reserve(candidates->size());
+                for (const auto id : *candidates) {
+                    auto itemIt = engine.items.find(id);
+                    if (itemIt != engine.items.end() && itemIt->second.snapshot.containerId == containerId) {
+                        materialized.push_back(itemIt->second.snapshot);
+                    }
+                }
+                applyQuerySpec(schemaData(engine.schema), materialized, spec);
+                for (const auto &item : materialized) {
+                    if (!emit(item)) {
+                        return;
+                    }
+                }
+                return;
+            }
+        }
+
+        if (orderedPlan) {
+            bool keepGoing = true;
+            engine.indexes.orderedIndex(*orderedPlan->index,
+                                        orderedPlan->groupKey,
+                                        orderedPlan->descending,
+                                        [&](ItemId id) {
+                                            if (candidates && !usesIntervalCandidates &&
+                                                candidates->find(id) == candidates->end()) {
+                                                return true;
+                                            }
+                                            keepGoing = emitId(id);
+                                            return keepGoing;
+                                        });
+            return;
         }
 
         if (!useListDefaultOrder && spec.sortKeys.size() > 1 &&

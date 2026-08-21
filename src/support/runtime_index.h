@@ -52,6 +52,13 @@ struct RuntimeRangeConstraint {
     Value value;
 };
 
+struct RuntimeOrderedRange {
+    std::optional<Value> lower;
+    bool lowerInclusive = false;
+    std::optional<Value> upper;
+    bool upperInclusive = false;
+};
+
 class ScalarValueIndex {
 public:
     void add(const Value &value, ItemId id);
@@ -133,6 +140,13 @@ public:
                  const std::vector<Value> &groupKey,
                  bool descending,
                  const std::function<bool(ItemId)> &visitor) const;
+    void orderedRanges(const OrderedIndexDefinitionRecord &definition,
+                       const std::vector<Value> &groupKey,
+                       const std::vector<RuntimeOrderedRange> &ranges,
+                       bool descending,
+                       const std::function<bool(ItemId)> &visitor) const;
+    std::size_t groupSize(const OrderedIndexDefinitionRecord &definition,
+                          const std::vector<Value> &groupKey) const;
 
 public:
     struct GroupKey {
@@ -222,6 +236,13 @@ public:
                       const std::vector<Value> &groupKey,
                       bool descending,
                       const std::function<bool(ItemId)> &visitor) const;
+    void orderedIndexRanges(const OrderedIndexDefinitionRecord &definition,
+                            const std::vector<Value> &groupKey,
+                            const std::vector<RuntimeOrderedRange> &ranges,
+                            bool descending,
+                            const std::function<bool(ItemId)> &visitor) const;
+    std::size_t orderedIndexGroupSize(const OrderedIndexDefinitionRecord &definition,
+                                      const std::vector<Value> &groupKey) const;
     std::optional<ItemId> previous(const OrderedIndexDefinitionRecord &definition,
                                    const ItemSnapshot &probe,
                                    const std::set<ItemId> &excludedIds) const;
