@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <iterator>
-#include <set>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <stdcorelib/pimpl.h>
@@ -23,6 +26,46 @@ namespace dini {
 
     template <typename... T>
     Overloaded(T...) -> Overloaded<T...>;
+
+    void hashCombine(std::size_t &seed, std::size_t value) noexcept
+    {
+        seed ^= value + std::size_t {0x9e3779b9U} + (seed << 6U) + (seed >> 2U);
+    }
+
+    struct UpdateKey {
+        ChangeOperationKind kind;
+        ItemId itemId;
+        ColumnHandle column;
+
+        friend bool operator==(const UpdateKey &lhs, const UpdateKey &rhs)
+        {
+            return lhs.kind == rhs.kind && lhs.itemId == rhs.itemId && lhs.column == rhs.column;
+        }
+    };
+
+    struct UpdateKeyHash {
+        std::size_t operator()(const UpdateKey &key) const
+        {
+            std::size_t result = 0;
+            hashCombine(result, std::hash<std::size_t> {}(static_cast<std::size_t>(key.kind)));
+            hashCombine(result, std::hash<ItemId> {}(key.itemId));
+            hashCombine(result, std::hash<SchemaId> {}(key.column.schemaId()));
+            hashCombine(result, std::hash<ContainerId> {}(key.column.containerId()));
+            hashCombine(result, std::hash<ColumnId> {}(key.column.columnId()));
+            hashCombine(result, std::hash<std::string> {}(key.column.debugName()));
+            return result;
+        }
+    };
+
+    struct OperationIndexPairHash {
+        std::size_t operator()(const std::pair<std::size_t, std::size_t> &value) const noexcept
+        {
+            std::size_t result = 0;
+            hashCombine(result, std::hash<std::size_t> {}(value.first));
+            hashCombine(result, std::hash<std::size_t> {}(value.second));
+            return result;
+        }
+    };
 
     ChangeOperationKind operationKind(const ChangeOperation::Payload &payload) noexcept
     {
@@ -242,20 +285,26 @@ ChangeSet ChangeSet::merge(const std::vector<ChangeSet> &changes)
 
     std::vector<ChangeOperation> mergedOperations;
     std::vector<std::size_t> mergedIndexBySource(flattenedOperations.size());
+    std::unordered_map<UpdateKey, std::size_t, UpdateKeyHash> mergedIndexByUpdate;
+    mergedIndexByUpdate.reserve(flattenedOperations.size());
 
     for (std::size_t sourceIndex = 0; sourceIndex < flattenedOperations.size(); ++sourceIndex) {
         const auto &operation = flattenedOperations[sourceIndex];
-        auto mergedOperation = mergedOperations.end();
+        std::optional<UpdateKey> updateKey;
+        std::optional<std::size_t> mergedIndex;
 
         if (const auto *change = std::get_if<ColumnUpdatedChange>(&operation.payload())) {
-            mergedOperation = std::find_if(mergedOperations.begin(), mergedOperations.end(), [change](const auto &candidate) {
-                const auto *existing = std::get_if<ColumnUpdatedChange>(&candidate.payload());
-                return existing && existing->itemId == change->itemId && existing->column == change->column;
+            updateKey.emplace(UpdateKey {
+                .kind = ChangeOperationKind::ColumnUpdated,
+                .itemId = change->itemId,
+                .column = change->column,
             });
+            const auto existingIndex = mergedIndexByUpdate.find(*updateKey);
 
-            if (mergedOperation != mergedOperations.end()) {
-                const auto existing = std::get<ColumnUpdatedChange>(mergedOperation->payload());
-                *mergedOperation = ChangeOperation(ChangeOperation::Payload {ColumnUpdatedChange {
+            if (existingIndex != mergedIndexByUpdate.end()) {
+                mergedIndex = existingIndex->second;
+                const auto existing = std::get<ColumnUpdatedChange>(mergedOperations[*mergedIndex].payload());
+                mergedOperations[*mergedIndex] = ChangeOperation(ChangeOperation::Payload {ColumnUpdatedChange {
                     .itemId = change->itemId,
                     .column = change->column,
                     .oldValue = existing.oldValue,
@@ -265,14 +314,17 @@ ChangeSet ChangeSet::merge(const std::vector<ChangeSet> &changes)
                 }});
             }
         } else if (const auto *change = std::get_if<ComputedColumnUpdatedChange>(&operation.payload())) {
-            mergedOperation = std::find_if(mergedOperations.begin(), mergedOperations.end(), [change](const auto &candidate) {
-                const auto *existing = std::get_if<ComputedColumnUpdatedChange>(&candidate.payload());
-                return existing && existing->itemId == change->itemId && existing->column == change->column;
+            updateKey.emplace(UpdateKey {
+                .kind = ChangeOperationKind::ComputedColumnUpdated,
+                .itemId = change->itemId,
+                .column = change->column,
             });
+            const auto existingIndex = mergedIndexByUpdate.find(*updateKey);
 
-            if (mergedOperation != mergedOperations.end()) {
-                const auto existing = std::get<ComputedColumnUpdatedChange>(mergedOperation->payload());
-                *mergedOperation = ChangeOperation(ChangeOperation::Payload {ComputedColumnUpdatedChange {
+            if (existingIndex != mergedIndexByUpdate.end()) {
+                mergedIndex = existingIndex->second;
+                const auto existing = std::get<ComputedColumnUpdatedChange>(mergedOperations[*mergedIndex].payload());
+                mergedOperations[*mergedIndex] = ChangeOperation(ChangeOperation::Payload {ComputedColumnUpdatedChange {
                     .itemId = change->itemId,
                     .column = change->column,
                     .oldValue = existing.oldValue,
@@ -281,13 +333,15 @@ ChangeSet ChangeSet::merge(const std::vector<ChangeSet> &changes)
             }
         }
 
-        if (mergedOperation == mergedOperations.end()) {
+        if (!mergedIndex.has_value()) {
             mergedOperations.push_back(operation);
-            mergedIndexBySource[sourceIndex] = mergedOperations.size() - 1;
-        } else {
-            mergedIndexBySource[sourceIndex] = static_cast<std::size_t>(
-                std::distance(mergedOperations.begin(), mergedOperation));
+            mergedIndex = mergedOperations.size() - 1;
+            if (updateKey.has_value()) {
+                mergedIndexByUpdate.emplace(std::move(*updateKey), *mergedIndex);
+            }
         }
+
+        mergedIndexBySource[sourceIndex] = *mergedIndex;
     }
 
     ChangeSet merged;
@@ -295,7 +349,8 @@ ChangeSet ChangeSet::merge(const std::vector<ChangeSet> &changes)
         merged.append(operation);
     }
 
-    std::set<std::pair<std::size_t, std::size_t>> addedLinks;
+    std::unordered_set<std::pair<std::size_t, std::size_t>, OperationIndexPairHash> addedLinks;
+    addedLinks.reserve(flattenedLinks.size());
     for (const auto &link : flattenedLinks) {
         const auto mergedLink = std::pair {
             mergedIndexBySource[link.sourceOperation],
