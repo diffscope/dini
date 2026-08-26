@@ -152,6 +152,19 @@ enum class ContainerKind {
 };
 
 /**
+ * @brief Selects the runtime storage strategy for an ordered list.
+ *
+ * Indexed lists maintain query and aggregate indexes eagerly. Dense lists retain
+ * item identity, ordering, transactions, snapshots, and change notifications,
+ * but answer supported queries by scanning their contiguous list groups instead
+ * of maintaining per-item tree indexes.
+ */
+enum class ListStorageMode {
+    Indexed,
+    Dense
+};
+
+/**
  * @brief Field category used by query expressions and aggregation grouping.
  */
 enum class FieldKind {

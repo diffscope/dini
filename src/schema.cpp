@@ -49,6 +49,7 @@ namespace dini {
         writer.writeSize(data.containers.size());
         for (const auto &container : data.containers) {
             writer.writeByte(static_cast<std::uint8_t>(container.info.kind));
+            writer.writeByte(static_cast<std::uint8_t>(container.listStorageMode));
             writer.writeUInt32(container.info.id);
             writer.writeString(container.info.debugName);
             writer.writeUInt32(container.listAssociation.value_or(0));
@@ -200,6 +201,11 @@ namespace dini {
         for (const auto &container : data.containers) {
             if (container.info.kind == ContainerKind::List && !container.listAssociation) {
                 throw SchemaError("list container must define an association");
+            }
+            if (container.listStorageMode == ListStorageMode::Dense &&
+                (!container.rangeIndexes.empty() || !container.orderedIndexes.empty() ||
+                 !container.intervalIndexes.empty())) {
+                throw SchemaError("dense list storage does not support maintained range, ordered, or interval indexes");
             }
             for (std::size_t i = 0; i < container.columns.size(); ++i) {
                 const auto &column = container.columns[i];
@@ -607,11 +613,12 @@ TableBuilder SchemaBuilder::createTable(std::string debugName)
     return builder;
 }
 
-ListBuilder SchemaBuilder::createList(std::string debugName)
+ListBuilder SchemaBuilder::createList(std::string debugName, ListStorageMode storageMode)
 {
     requireMutable(_impl.get());
     ContainerDefinitionRecord record;
     record.info.kind = ContainerKind::List;
+    record.listStorageMode = storageMode;
     record.info.id = _impl->data.nextContainerId++;
     record.info.debugName = std::move(debugName);
     _impl->data.containers.push_back(std::move(record));

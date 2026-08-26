@@ -451,6 +451,7 @@ public:
      * @brief Creates a table definition.
      *
      * @param debugName Optional diagnostic name.
+     * @param storageMode Runtime storage strategy for list elements.
      * @pre The builder must not be frozen.
      * @post Returns a TableBuilder for adding columns, variants, relations, and hooks.
      * @throws SchemaError if this builder is invalid or frozen.
@@ -465,7 +466,8 @@ public:
      * @post Returns a ListBuilder for adding columns, associations, variants, and hooks.
      * @throws SchemaError if this builder is invalid or frozen.
      */
-    ListBuilder createList(std::string debugName);
+    ListBuilder createList(std::string debugName,
+                           ListStorageMode storageMode = ListStorageMode::Indexed);
 
     /**
      * @brief Freezes the schema definition into an EngineSchema.

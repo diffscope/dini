@@ -1451,6 +1451,10 @@ const std::string &RuntimeIndexStore::parentKey(ContainerId containerId, ColumnI
 
 void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, const ItemSnapshot &snapshot)
 {
+    const auto *container = findContainer(schemaDefinition, snapshot.containerId);
+    if (container && container->listStorageMode == ListStorageMode::Dense) {
+        return;
+    }
     auto &containerItems = _containerItems[snapshot.containerId];
     containerItems.insert(containerItems.end(), snapshot.id);
     std::map<RuntimeIndexedFieldKey, Value> rangeValues;
@@ -1459,7 +1463,6 @@ void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, co
         _scalarIndexes[field].add(value, snapshot.id);
     };
 
-    const auto *container = findContainer(schemaDefinition, snapshot.containerId);
     if (!container || !container->variants.empty()) {
         addValue(runtimeVariantField(snapshot.containerId),
                  snapshot.variant ? Value(static_cast<std::uint64_t>(snapshot.variant->variantId())) : Value::null());
@@ -1518,6 +1521,10 @@ void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, co
 
 void RuntimeIndexStore::removeItem(const SchemaDefinitionData &schemaDefinition, const ItemSnapshot &snapshot)
 {
+    const auto *container = findContainer(schemaDefinition, snapshot.containerId);
+    if (container && container->listStorageMode == ListStorageMode::Dense) {
+        return;
+    }
     auto containerIt = _containerItems.find(snapshot.containerId);
     if (containerIt != _containerItems.end()) {
         containerIt->second.erase(snapshot.id);
@@ -1537,7 +1544,6 @@ void RuntimeIndexStore::removeItem(const SchemaDefinitionData &schemaDefinition,
         }
     };
 
-    const auto *container = findContainer(schemaDefinition, snapshot.containerId);
     if (!container || !container->variants.empty()) {
         removeValue(runtimeVariantField(snapshot.containerId),
                     snapshot.variant ? Value(static_cast<std::uint64_t>(snapshot.variant->variantId())) : Value::null());

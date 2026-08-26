@@ -52,6 +52,7 @@ struct IntervalIndexDefinitionRecord {
 
 struct ContainerDefinitionRecord {
     ContainerInfo info;
+    ListStorageMode listStorageMode = ListStorageMode::Indexed;
     std::vector<ColumnDefinitionRecord> columns;
     std::vector<RelationDefinitionRecord> relations;
     std::vector<VariantDefinitionRecord> variants;

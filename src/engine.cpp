@@ -193,6 +193,29 @@ namespace dini {
         return *container;
     }
 
+    bool usesDenseListStorage(const SchemaDefinitionData &schemaDefinition, ContainerId containerId)
+    {
+        const auto *container = findContainer(schemaDefinition, containerId);
+        return container && container->info.kind == ContainerKind::List &&
+               container->listStorageMode == ListStorageMode::Dense;
+    }
+
+    template <typename Map>
+    void reserveForGrowth(Map &map, std::size_t additional)
+    {
+        if (additional == 0) {
+            return;
+        }
+        const auto required = map.size() + additional;
+        const auto currentCapacity = static_cast<std::size_t>(
+            static_cast<double>(map.bucket_count()) * static_cast<double>(map.max_load_factor()));
+        if (required <= currentCapacity) {
+            return;
+        }
+        const auto geometricCapacity = map.size() + std::max(map.size() / 2, std::size_t {64});
+        map.reserve(std::max(required, geometricCapacity));
+    }
+
     const ColumnDefinitionRecord &columnFor(const SchemaDefinitionData &schemaDefinition, ColumnHandle column)
     {
         const auto *record = findColumn(schemaDefinition, column.containerId(), column.columnId());
@@ -258,15 +281,15 @@ namespace dini {
 
     void recordRollbackItem(Transaction::Impl &transaction, ItemId itemId)
     {
-        if (!transaction.engine || transaction.rollbackItems.find(itemId) != transaction.rollbackItems.end()) {
+        if (!transaction.engine || transaction.rollbackItems.contains(itemId)) {
             return;
         }
         auto it = transaction.engine->items.find(itemId);
         if (it == transaction.engine->items.end()) {
-            transaction.rollbackItems.emplace(itemId, std::nullopt);
+            transaction.rollbackItems.recordInserted(itemId);
             return;
         }
-        transaction.rollbackItems.emplace(itemId, it->second);
+        transaction.rollbackItems.recordExisting(itemId, it->second);
     }
 
     void recordRollbackListGroup(Transaction::Impl &transaction, ContainerId containerId, const std::string &key)
@@ -322,12 +345,11 @@ namespace dini {
         if (!engine) {
             return;
         }
-        for (const auto &[itemId, item] : transaction.rollbackItems) {
-            if (item) {
-                engine->items[itemId] = *item;
-            } else {
-                engine->items.erase(itemId);
-            }
+        for (const auto &[itemId, item] : transaction.rollbackItems.existingItems()) {
+            engine->items[itemId] = item;
+        }
+        for (const auto itemId : transaction.rollbackItems.insertedItems()) {
+            engine->items.erase(itemId);
         }
         for (const auto &[key, group] : transaction.rollbackListGroups) {
             if (group) {
@@ -741,6 +763,15 @@ namespace dini {
                                             const ItemSnapshot &snapshot,
                                             const Value &value)
     {
+        if (container.listStorageMode == ListStorageMode::Dense) {
+            RuntimeItemIdSet candidates;
+            for (const auto &[id, item] : engine.items) {
+                if (item.snapshot.containerId == snapshot.containerId) {
+                    candidates.insert(id);
+                }
+            }
+            return candidates;
+        }
         auto candidateField = runtimeColumnField(snapshot.containerId, column.info.id);
         auto candidateValue = value;
         auto candidateCount = engine.indexes.countField(candidateField, ComparisonOperator::Equal, candidateValue);
@@ -1298,8 +1329,9 @@ namespace dini {
         validateSnapshot(engine, snapshot);
         const auto id = snapshot.id;
         insertIntoListGroup(engine, snapshot);
-        engine.items[id] = RuntimeItem {std::move(snapshot)};
-        addItemToIndexes(engine, engine.items.at(id).snapshot);
+        auto &runtimeItem = engine.items[id];
+        runtimeItem = RuntimeItem {std::move(snapshot)};
+        addItemToIndexes(engine, runtimeItem.snapshot);
         observeItemId(engine, id);
     }
 
@@ -1546,8 +1578,9 @@ namespace dini {
     void insertValidatedSnapshotWithoutListGroup(DocumentEngine::Impl &engine, ItemSnapshot &snapshot)
     {
         const auto id = snapshot.id;
-        engine.items[id] = RuntimeItem {std::move(snapshot)};
-        addItemToIndexes(engine, engine.items.at(id).snapshot);
+        auto &runtimeItem = engine.items[id];
+        runtimeItem = RuntimeItem {std::move(snapshot)};
+        addItemToIndexes(engine, runtimeItem.snapshot);
         observeItemId(engine, id);
     }
 
@@ -3017,6 +3050,9 @@ namespace dini {
                                                                    ContainerId containerId,
                                                                    const FilterExpression &expression)
     {
+        if (usesDenseListStorage(schemaData(engine.schema), containerId)) {
+            return std::nullopt;
+        }
         const auto &impl = filterExpressionImpl(expression);
         if (impl.empty) {
             return std::nullopt;
@@ -3312,12 +3348,24 @@ namespace dini {
         }
 
         std::vector<ItemSnapshot> materialized;
-        const auto &ids = candidates ? *candidates : engine.indexes.containerItems(containerId);
-        materialized.reserve(ids.size());
-        for (const auto id : ids) {
-            auto itemIt = engine.items.find(id);
-            if (itemIt != engine.items.end() && itemIt->second.snapshot.containerId == containerId) {
-                materialized.push_back(itemIt->second.snapshot);
+        if (!candidates && usesDenseListStorage(schemaData(engine.schema), containerId)) {
+            for (const auto &[id, item] : engine.items) {
+                (void)id;
+                if (item.snapshot.containerId == containerId) {
+                    materialized.push_back(item.snapshot);
+                }
+            }
+            std::sort(materialized.begin(), materialized.end(), [](const auto &lhs, const auto &rhs) {
+                return lhs.id < rhs.id;
+            });
+        } else {
+            const auto &ids = candidates ? *candidates : engine.indexes.containerItems(containerId);
+            materialized.reserve(ids.size());
+            for (const auto id : ids) {
+                auto itemIt = engine.items.find(id);
+                if (itemIt != engine.items.end() && itemIt->second.snapshot.containerId == containerId) {
+                    materialized.push_back(itemIt->second.snapshot);
+                }
             }
         }
         if (useListDefaultOrder && spec.sortKeys.empty()) {
@@ -3569,6 +3617,7 @@ View DocumentEngine::query(ListHandle list, const QuerySpec &spec) const
     auto *engine = _impl.get();
     const auto normalizedSpec = normalizedQuerySpec(_impl->schema, list.containerId(), spec);
     const auto parentSelection = parentSelectionForExpression(list.containerId(), normalizedSpec.filter);
+    const auto denseStorage = usesDenseListStorage(schemaData(_impl->schema), list.containerId());
     auto data = SharedDataPointer<View::Impl>(new View::Impl(nullptr, [engine, list, normalizedSpec]() {
         std::vector<ItemSnapshot> result;
         executeQueryResults(*engine, list.containerId(), normalizedSpec, true, [&](const ItemSnapshot &item) {
@@ -3582,7 +3631,7 @@ View DocumentEngine::query(ListHandle list, const QuerySpec &spec) const
                                                            std::optional<std::size_t> limit) {
         executeQueryResults(*engine, list.containerId(), normalizedSpec, true, visitor, offset, limit);
     };
-    if (normalizedSpec.filter.isEmpty()) {
+    if (!denseStorage && normalizedSpec.filter.isEmpty()) {
         data.data()->aggregator = [engine, list](const AggregationSpec &aggregate,
                                                  std::size_t offset,
                                                  std::optional<std::size_t> limit)
@@ -3592,7 +3641,7 @@ View DocumentEngine::query(ListHandle list, const QuerySpec &spec) const
             }
             return engine->indexes.aggregate(schemaData(engine->schema), list.containerId(), aggregate);
         };
-    } else if (parentSelection) {
+    } else if (!denseStorage && parentSelection) {
         data.data()->counter = [engine, list, selection = *parentSelection](
                                    std::size_t offset,
                                    std::optional<std::size_t> limit) -> std::optional<std::size_t> {
@@ -4216,10 +4265,10 @@ std::vector<ItemId> Transaction::insert(ListHandle list,
             operationChange.addDerivedLink(link);
         }
 
-        _impl->rollbackItems.reserve(_impl->rollbackItems.size() + snapshots.size());
-        engine.items.reserve(engine.items.size() + snapshots.size());
+        _impl->rollbackItems.reserveInsertedForGrowth(snapshots.size());
+        reserveForGrowth(engine.items, snapshots.size());
         for (const auto &snapshot : snapshots) {
-            _impl->rollbackItems.try_emplace(snapshot.id, std::nullopt);
+            _impl->rollbackItems.recordInserted(snapshot.id);
         }
         std::optional<std::string> associationKey;
         if (!associationValue.isNull()) {
