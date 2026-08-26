@@ -13,12 +13,13 @@ namespace dini {
 
 namespace {
 
-Value valueForColumn(const ItemSnapshot &item, ColumnId columnId)
+const Value &valueForColumn(const ItemSnapshot &item, ColumnId columnId)
 {
+    static const Value nullValue = Value::null();
     auto it = std::find_if(item.values.begin(), item.values.end(), [columnId](const ColumnValue &columnValue) {
         return columnValue.column.columnId() == columnId;
     });
-    return it == item.values.end() ? Value::null() : it->value;
+    return it == item.values.end() ? nullValue : it->value;
 }
 
 bool columnIsIndexed(const ColumnDefinitionRecord &column)
@@ -502,21 +503,61 @@ bool operator==(const ComparableValueKey &lhs, const ComparableValueKey &rhs)
     return compareValues(lhs.value, rhs.value) == 0;
 }
 
+ScalarValueIndex::ScalarValueIndex(const ScalarValueIndex &other)
+    : _buckets(other._buckets), _lastBucket(_buckets.end())
+{
+}
+
+ScalarValueIndex &ScalarValueIndex::operator=(const ScalarValueIndex &other)
+{
+    if (this != &other) {
+        _buckets = other._buckets;
+        _lastBucket = _buckets.end();
+    }
+    return *this;
+}
+
+ScalarValueIndex::ScalarValueIndex(ScalarValueIndex &&other) noexcept
+    : _buckets(std::move(other._buckets)), _lastBucket(_buckets.end())
+{
+    other._lastBucket = other._buckets.end();
+}
+
+ScalarValueIndex &ScalarValueIndex::operator=(ScalarValueIndex &&other) noexcept
+{
+    if (this != &other) {
+        _buckets = std::move(other._buckets);
+        _lastBucket = _buckets.end();
+        other._lastBucket = other._buckets.end();
+    }
+    return *this;
+}
+
 void ScalarValueIndex::add(const Value &value, ItemId id)
 {
-    auto bucket = _buckets.emplace_hint(_buckets.end(), ComparableValueKey(value), RuntimeItemIdSet {});
-    bucket->second.insert(bucket->second.end(), id);
+    if (_lastBucket == _buckets.end() || compareValues(_lastBucket->first.value, value) != 0) {
+        _lastBucket = _buckets.emplace_hint(_buckets.end(), ComparableValueKey(value), RuntimeItemIdSet {});
+    }
+    _lastBucket->second.insert(_lastBucket->second.end(), id);
 }
 
 void ScalarValueIndex::remove(const Value &value, ItemId id)
 {
-    auto bucketIt = _buckets.find(ComparableValueKey(value));
+    auto bucketIt = _lastBucket;
+    if (bucketIt == _buckets.end() || compareValues(bucketIt->first.value, value) != 0) {
+        bucketIt = _buckets.find(ComparableValueKey(value));
+    }
     if (bucketIt == _buckets.end()) {
         return;
     }
     bucketIt->second.erase(id);
     if (bucketIt->second.empty()) {
+        if (bucketIt == _lastBucket) {
+            _lastBucket = _buckets.end();
+        }
         _buckets.erase(bucketIt);
+    } else {
+        _lastBucket = bucketIt;
     }
 }
 
@@ -845,7 +886,7 @@ std::vector<ComparableValueKey> keyValuesForColumns(const ItemSnapshot &snapshot
     std::vector<ComparableValueKey> values;
     values.reserve(columns.size());
     for (const auto &column : columns) {
-        const auto value = valueForColumn(snapshot, column.columnId());
+        const auto &value = valueForColumn(snapshot, column.columnId());
         if (value.isNull()) {
             return {};
         }
@@ -1395,6 +1436,19 @@ void RuntimeIndexStore::clear()
     _parentCounts.clear();
 }
 
+const std::string &RuntimeIndexStore::parentKey(ContainerId containerId, ColumnId columnId, const Value &value)
+{
+    if (!_hasLastParentKey || _lastParentKeyContainerId != containerId ||
+        _lastParentKeyColumnId != columnId || _lastParentKeyValue != value) {
+        _lastParentKeyContainerId = containerId;
+        _lastParentKeyColumnId = columnId;
+        _lastParentKeyValue = value;
+        _lastParentKey = stableValueKey(value);
+        _hasLastParentKey = true;
+    }
+    return _lastParentKey;
+}
+
 void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, const ItemSnapshot &snapshot)
 {
     auto &containerItems = _containerItems[snapshot.containerId];
@@ -1425,8 +1479,9 @@ void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, co
         _intervalIndexes[{snapshot.containerId, intervalIndex.handle.indexId()}].add(intervalIndex, snapshot);
     }
     for (const auto &relation : container->relations) {
-        const auto groupValue = valueForColumn(snapshot, relation.info.column.columnId());
-        auto &bucket = _parentCounts[snapshot.containerId][relation.info.column.columnId()][stableValueKey(groupValue)];
+        const auto &groupValue = valueForColumn(snapshot, relation.info.column.columnId());
+        auto &bucket = _parentCounts[snapshot.containerId][relation.info.column.columnId()]
+                                    [parentKey(snapshot.containerId, relation.info.column.columnId(), groupValue)];
         bucket.groupValue = groupValue;
         ++bucket.count;
     }
@@ -1438,7 +1493,7 @@ void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, co
             (!snapshot.variant || snapshot.variant->variantId() != column.variantId)) {
             continue;
         }
-        const auto value = valueForColumn(snapshot, column.info.id);
+        const auto &value = valueForColumn(snapshot, column.info.id);
         addValue(runtimeColumnField(snapshot.containerId, column.info.id), value);
         if (rangeColumnIds.find(column.info.id) != rangeColumnIds.end() && runtimeNumericValue(value)) {
             rangeValues[runtimeColumnField(snapshot.containerId, column.info.id)] = value;
@@ -1450,7 +1505,7 @@ void RuntimeIndexStore::addItem(const SchemaDefinitionData &schemaDefinition, co
             addAggregateValue(aggregate.total, aggregateOptions, value);
             if (aggregateOptions.byParent) {
                 for (const auto &relation : container->relations) {
-                    const auto groupValue = valueForColumn(snapshot, relation.info.column.columnId());
+                    const auto &groupValue = valueForColumn(snapshot, relation.info.column.columnId());
                     auto &group = aggregate.byParent[relation.info.column.columnId()][stableValueKey(groupValue)];
                     group.groupValue = groupValue;
                     addAggregateValue(group.bucket, aggregateOptions, value);
@@ -1501,12 +1556,14 @@ void RuntimeIndexStore::removeItem(const SchemaDefinitionData &schemaDefinition,
             }
         }
         for (const auto &relation : container->relations) {
-            const auto groupValue = valueForColumn(snapshot, relation.info.column.columnId());
+            const auto &groupValue = valueForColumn(snapshot, relation.info.column.columnId());
             auto relationIt = _parentCounts.find(snapshot.containerId);
             if (relationIt != _parentCounts.end()) {
                 auto columnIt = relationIt->second.find(relation.info.column.columnId());
                 if (columnIt != relationIt->second.end()) {
-                    auto bucketIt = columnIt->second.find(stableValueKey(groupValue));
+                    auto bucketIt = columnIt->second.find(parentKey(snapshot.containerId,
+                                                                   relation.info.column.columnId(),
+                                                                   groupValue));
                     if (bucketIt != columnIt->second.end()) {
                         if (bucketIt->second.count <= 1) {
                             columnIt->second.erase(bucketIt);
@@ -1531,7 +1588,7 @@ void RuntimeIndexStore::removeItem(const SchemaDefinitionData &schemaDefinition,
                 (!snapshot.variant || snapshot.variant->variantId() != column.variantId)) {
                 continue;
             }
-            const auto value = valueForColumn(snapshot, column.info.id);
+            const auto &value = valueForColumn(snapshot, column.info.id);
             removeValue(runtimeColumnField(snapshot.containerId, column.info.id), value);
             const auto aggregateOptions = aggregateOptionsFor(column);
             if (aggregateEnabled(aggregateOptions)) {
@@ -1540,7 +1597,7 @@ void RuntimeIndexStore::removeItem(const SchemaDefinitionData &schemaDefinition,
                     removeAggregateValue(aggregateIt->second.total, aggregateIt->second.options, value);
                     if (aggregateIt->second.options.byParent) {
                         for (const auto &relation : container->relations) {
-                            const auto groupValue = valueForColumn(snapshot, relation.info.column.columnId());
+                        const auto &groupValue = valueForColumn(snapshot, relation.info.column.columnId());
                             auto relationIt = aggregateIt->second.byParent.find(relation.info.column.columnId());
                             if (relationIt == aggregateIt->second.byParent.end()) {
                                 continue;

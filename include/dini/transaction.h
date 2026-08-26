@@ -399,6 +399,7 @@ private:
     std::unique_ptr<Impl> _impl;
 
     explicit Transaction(std::unique_ptr<Impl> data);
+    static void updateMultiple(Impl *transaction, ItemId itemId, std::vector<ColumnValue> values);
     ItemId insertListItem(ListHandle list,
                           Value associationValue,
                           std::size_t index,

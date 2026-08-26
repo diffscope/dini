@@ -3,6 +3,7 @@
 
 #include <map>
 #include <memory>
+#include <memory_resource>
 #include <optional>
 #include <set>
 #include <string>
@@ -25,7 +26,8 @@ struct RuntimeItem {
 
 struct DocumentEngine::Impl {
     EngineSchema schema;
-    std::unordered_map<ItemId, RuntimeItem> items;
+    std::pmr::unsynchronized_pool_resource itemPool;
+    std::pmr::unordered_map<ItemId, RuntimeItem> items {&itemPool};
     std::map<std::pair<ContainerId, std::string>, std::vector<ItemId>> listGroups;
     RuntimeIndexStore indexes;
     std::vector<UndoStep> undoStack;

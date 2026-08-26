@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -61,6 +62,12 @@ struct RuntimeOrderedRange {
 
 class ScalarValueIndex {
 public:
+    ScalarValueIndex() = default;
+    ScalarValueIndex(const ScalarValueIndex &other);
+    ScalarValueIndex &operator=(const ScalarValueIndex &other);
+    ScalarValueIndex(ScalarValueIndex &&other) noexcept;
+    ScalarValueIndex &operator=(ScalarValueIndex &&other) noexcept;
+
     void add(const Value &value, ItemId id);
     void remove(const Value &value, ItemId id);
     RuntimeItemIdSet query(ComparisonOperator op, const Value &value) const;
@@ -69,7 +76,9 @@ public:
     bool empty() const noexcept;
 
 private:
-    std::map<ComparableValueKey, RuntimeItemIdSet> _buckets;
+    using BucketMap = std::map<ComparableValueKey, RuntimeItemIdSet>;
+    BucketMap _buckets;
+    BucketMap::iterator _lastBucket = _buckets.end();
 };
 
 class EqualityValueIndex {
@@ -292,8 +301,14 @@ private:
     std::map<std::pair<ContainerId, std::uint32_t>, IntervalRuntimeIndex> _intervalIndexes;
     std::map<std::pair<ContainerId, ColumnId>, AggregateColumnData> _aggregateColumns;
     std::map<ContainerId, std::map<ColumnId, std::map<std::string, ParentCountBucket>>> _parentCounts;
+    ContainerId _lastParentKeyContainerId = 0;
+    ColumnId _lastParentKeyColumnId = 0;
+    Value _lastParentKeyValue;
+    std::string _lastParentKey;
+    bool _hasLastParentKey = false;
 
     static const RuntimeItemIdSet &emptySet();
+    const std::string &parentKey(ContainerId containerId, ColumnId columnId, const Value &value);
 };
 
 bool runtimeValueSupportsOrdering(ValueType type) noexcept;
