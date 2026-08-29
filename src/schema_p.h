@@ -1,6 +1,7 @@
 #ifndef DINI_SCHEMA_P_H
 #define DINI_SCHEMA_P_H
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -73,6 +74,8 @@ struct SchemaDefinitionData : SharedData {
     std::uint32_t nextOrderedIndexId = 1;
     std::uint32_t nextIntervalIndexId = 1;
     std::vector<ContainerDefinitionRecord> containers;
+    std::vector<std::pair<ContainerId, std::size_t>> columnLocations;
+    ByteArray serializedStructure;
 };
 
 struct EngineSchema::Impl : SchemaDefinitionData {

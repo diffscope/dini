@@ -318,18 +318,26 @@ namespace dini {
 
 ContainerDefinitionRecord *findContainer(SchemaDefinitionData &data, ContainerId id)
 {
-    auto it = std::find_if(data.containers.begin(), data.containers.end(), [id](const auto &container) {
-        return container.info.id == id;
-    });
-    return it == data.containers.end() ? nullptr : &*it;
+    if (id == 0) {
+        return nullptr;
+    }
+    const auto position = static_cast<std::size_t>(id - 1);
+    if (position >= data.containers.size() || data.containers[position].info.id != id) {
+        return nullptr;
+    }
+    return &data.containers[position];
 }
 
 const ContainerDefinitionRecord *findContainer(const SchemaDefinitionData &data, ContainerId id)
 {
-    auto it = std::find_if(data.containers.begin(), data.containers.end(), [id](const auto &container) {
-        return container.info.id == id;
-    });
-    return it == data.containers.end() ? nullptr : &*it;
+    if (id == 0) {
+        return nullptr;
+    }
+    const auto position = static_cast<std::size_t>(id - 1);
+    if (position >= data.containers.size() || data.containers[position].info.id != id) {
+        return nullptr;
+    }
+    return &data.containers[position];
 }
 
 ColumnDefinitionRecord *findColumn(SchemaDefinitionData &data, ContainerId containerId, ColumnId columnId)
@@ -337,6 +345,14 @@ ColumnDefinitionRecord *findColumn(SchemaDefinitionData &data, ContainerId conta
     auto *container = findContainer(data, containerId);
     if (!container) {
         return nullptr;
+    }
+    if (data.frozen && columnId < data.columnLocations.size()) {
+        const auto [ownerId, position] = data.columnLocations[columnId];
+        if (ownerId != containerId || position >= container->columns.size() ||
+            container->columns[position].info.id != columnId) {
+            return nullptr;
+        }
+        return &container->columns[position];
     }
     auto it = std::find_if(container->columns.begin(), container->columns.end(), [columnId](const auto &column) {
         return column.info.id == columnId;
@@ -349,6 +365,14 @@ const ColumnDefinitionRecord *findColumn(const SchemaDefinitionData &data, Conta
     const auto *container = findContainer(data, containerId);
     if (!container) {
         return nullptr;
+    }
+    if (data.frozen && columnId < data.columnLocations.size()) {
+        const auto [ownerId, position] = data.columnLocations[columnId];
+        if (ownerId != containerId || position >= container->columns.size() ||
+            container->columns[position].info.id != columnId) {
+            return nullptr;
+        }
+        return &container->columns[position];
     }
     auto it = std::find_if(container->columns.begin(), container->columns.end(), [columnId](const auto &column) {
         return column.info.id == columnId;
@@ -496,12 +520,16 @@ ByteArray EngineSchema::serializeStructure() const
     if (!isValid()) {
         throw SchemaError("schema is invalid");
     }
-    return serializeSchemaStructureData(impl);
+    return impl.serializedStructure;
 }
 
 bool EngineSchema::matchesSerializedStructure(const ByteArray &bytes) const
 {
-    return serializeStructure() == bytes;
+    stdc_impl_t;
+    if (!isValid()) {
+        throw SchemaError("schema is invalid");
+    }
+    return impl.serializedStructure == bytes;
 }
 
 ContainerInfo EngineSchema::tableInfo(TableHandle table) const
@@ -634,6 +662,14 @@ EngineSchema SchemaBuilder::freeze()
 {
     requireMutable(_impl.get());
     validateFrozenSchema(_impl->data);
+    _impl->data.columnLocations.assign(_impl->data.nextColumnId, {});
+    for (const auto &container : _impl->data.containers) {
+        for (std::size_t position = 0; position < container.columns.size(); ++position) {
+            const auto columnId = container.columns[position].info.id;
+            _impl->data.columnLocations[columnId] = {container.info.id, position};
+        }
+    }
+    _impl->data.serializedStructure = serializeSchemaStructureData(_impl->data);
     _impl->data.frozen = true;
     return EngineSchema(SharedDataPointer<EngineSchema::Impl>(new EngineSchema::Impl(nullptr, _impl->data)));
 }

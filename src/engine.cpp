@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -862,39 +863,6 @@ namespace dini {
         }
     }
 
-    void fillDefaults(const SchemaDefinitionData &schemaDefinition, ItemSnapshot &snapshot)
-    {
-        const auto &container = containerFor(schemaDefinition, snapshot.containerId);
-        for (const auto &column : container.columns) {
-            if (hasColumnValue(snapshot, column.info.id)) {
-                continue;
-            }
-            if (column.info.computed || column.info.association) {
-                continue;
-            }
-            if (column.info.variantSpecific) {
-                if (!snapshot.variant || snapshot.variant->variantId() != column.variantId) {
-                    continue;
-                }
-                if (column.variantDefinition.defaultValue) {
-                    setColumnValue(snapshot,
-                                   ColumnHandle(schemaDefinition.schemaId,
-                                                snapshot.containerId,
-                                                column.info.id,
-                                                column.info.debugName),
-                                   *column.variantDefinition.defaultValue);
-                }
-            } else if (column.normalDefinition.defaultValue) {
-                setColumnValue(snapshot,
-                               ColumnHandle(schemaDefinition.schemaId,
-                                            snapshot.containerId,
-                                            column.info.id,
-                                            column.info.debugName),
-                               *column.normalDefinition.defaultValue);
-            }
-        }
-    }
-
     std::vector<ComputedColumnUpdatedChange> recomputeComputedColumns(const SchemaDefinitionData &schemaDefinition,
                                                                       ItemSnapshot &snapshot)
     {
@@ -990,9 +958,7 @@ namespace dini {
         return changes;
     }
 
-    void validateSnapshot(DocumentEngine::Impl &engine,
-                          ItemSnapshot &snapshot,
-                          const ItemSnapshot *previousSnapshot = nullptr)
+    void validateSnapshotStructure(DocumentEngine::Impl &engine, ItemSnapshot &snapshot)
     {
         const auto &schemaDefinition = schemaData(engine.schema);
         const auto &container = containerFor(schemaDefinition, snapshot.containerId);
@@ -1015,7 +981,6 @@ namespace dini {
                 throw ConstraintError("variant does not belong to container");
             }
         }
-        fillDefaults(schemaDefinition, snapshot);
         for (const auto &columnValue : snapshot.values) {
             if (columnValue.column.schemaId() != schemaDefinition.schemaId ||
                 columnValue.column.containerId() != snapshot.containerId) {
@@ -1036,9 +1001,40 @@ namespace dini {
                 (!snapshot.variant || snapshot.variant->variantId() != column.variantId)) {
                 continue;
             }
-            validateValueForColumn(column, valueForColumn(snapshot, column.info.id));
+            if (hasColumnValue(snapshot, column.info.id)) {
+                continue;
+            }
+            const Value *defaultValue = nullptr;
+            if (!column.info.association) {
+                defaultValue = column.info.variantSpecific
+                                   ? (column.variantDefinition.defaultValue
+                                          ? &*column.variantDefinition.defaultValue
+                                          : nullptr)
+                                   : (column.normalDefinition.defaultValue
+                                          ? &*column.normalDefinition.defaultValue
+                                          : nullptr);
+            }
+            if (defaultValue) {
+                snapshot.values.push_back(ColumnValue {
+                    .column = ColumnHandle(schemaDefinition.schemaId,
+                                           snapshot.containerId,
+                                           column.info.id,
+                                           column.info.debugName),
+                    .value = *defaultValue,
+                });
+                validateValueForColumn(column, snapshot.values.back().value);
+            } else {
+                validateValueForColumn(column, valueForColumn(snapshot, column.info.id));
+            }
         }
         applyRelationMetadata(schemaDefinition, snapshot);
+    }
+
+    void validateSnapshot(DocumentEngine::Impl &engine,
+                          ItemSnapshot &snapshot,
+                          const ItemSnapshot *previousSnapshot = nullptr)
+    {
+        validateSnapshotStructure(engine, snapshot);
         validateParentRelations(engine, snapshot);
         validateUniqueColumns(engine, snapshot, previousSnapshot);
     }
@@ -1466,6 +1462,7 @@ namespace dini {
     struct PlannedListGroup {
         std::pair<ContainerId, std::string> key;
         std::vector<ItemId> items;
+        bool indexesAlreadyMatch = false;
     };
 
     bool planInsertedListGroups(const DocumentEngine::Impl &engine,
@@ -1508,7 +1505,11 @@ namespace dini {
                 for (const auto *snapshot : tailInsertions) {
                     result.push_back(snapshot->id);
                 }
-                plans.push_back(PlannedListGroup {.key = key, .items = std::move(result)});
+                plans.push_back(PlannedListGroup {
+                    .key = key,
+                    .items = std::move(result),
+                    .indexesAlreadyMatch = true,
+                });
                 continue;
             }
 
@@ -1669,7 +1670,7 @@ namespace dini {
             const auto hasUniqueColumn = std::any_of(container.columns.begin(), container.columns.end(), [](const auto &column) {
                 return column.info.index == IndexKind::Unique;
             });
-            if (sameContainer && !hasUniqueColumn) {
+            if (sameContainer && container.listStorageMode != ListStorageMode::Dense && !hasUniqueColumn) {
                 sortSnapshotPositionsById(siblings, snapshots);
                 std::copy(siblings.begin(), siblings.end(), children.begin() + static_cast<std::ptrdiff_t>(begin));
             }
@@ -1705,6 +1706,7 @@ namespace dini {
 
     bool insertItemSnapshots(DocumentEngine::Impl &engine, std::vector<ItemSnapshot> snapshots)
     {
+        engine.items.reserve(engine.items.size() + snapshots.size());
         std::unordered_map<ItemId, std::size_t> positionById;
         positionById.reserve(snapshots.size());
         for (std::size_t i = 0; i < snapshots.size(); ++i) {
@@ -1752,7 +1754,58 @@ namespace dini {
 
         for (auto &plan : listPlans) {
             engine.listGroups[plan.key] = std::move(plan.items);
-            refreshListIndexes(engine, plan.key.first, plan.key.second);
+            if (!plan.indexesAlreadyMatch) {
+                refreshListIndexes(engine, plan.key.first, plan.key.second);
+            }
+        }
+        return true;
+    }
+
+    bool restoreItemSnapshots(DocumentEngine::Impl &engine, std::vector<ItemSnapshot> snapshots)
+    {
+        for (auto &snapshot : snapshots) {
+            validateSnapshotStructure(engine, snapshot);
+        }
+
+        std::vector<PlannedListGroup> listPlans;
+        if (!planInsertedListGroups(engine, snapshots, listPlans)) {
+            return false;
+        }
+
+        engine.items.reserve(engine.items.size() + snapshots.size());
+        auto clearRestoredState = [&]() {
+            engine.items.clear();
+            engine.listGroups.clear();
+            engine.indexes.clear();
+        };
+        try {
+            for (auto &snapshot : snapshots) {
+                const auto id = snapshot.id;
+                const auto [it, inserted] = engine.items.emplace(id, RuntimeItem {std::move(snapshot)});
+                if (!inserted) {
+                    clearRestoredState();
+                    return false;
+                }
+                observeItemId(engine, id);
+            }
+            for (const auto &[id, item] : engine.items) {
+                (void)id;
+                addItemToIndexes(engine, item.snapshot);
+            }
+            for (auto &plan : listPlans) {
+                engine.listGroups[plan.key] = std::move(plan.items);
+                if (!plan.indexesAlreadyMatch) {
+                    refreshListIndexes(engine, plan.key.first, plan.key.second);
+                }
+            }
+            for (const auto &[id, item] : engine.items) {
+                (void)id;
+                validateParentRelations(engine, item.snapshot);
+                validateUniqueColumns(engine, item.snapshot);
+            }
+        } catch (...) {
+            clearRestoredState();
+            throw;
         }
         return true;
     }
@@ -3405,6 +3458,268 @@ namespace dini {
         }
     }
 
+    struct SnapshotHandleCache {
+        explicit SnapshotHandleCache(const SchemaDefinitionData &schemaDefinition)
+            : schemaDefinition(schemaDefinition),
+              columns(schemaDefinition.nextColumnId),
+              variants(schemaDefinition.nextVariantId)
+        {
+        }
+
+        const ColumnHandle &column(ContainerId containerId, ColumnId columnId)
+        {
+            if (columnId >= columns.size()) {
+                throw RecoveryError("snapshot column does not match schema");
+            }
+            if (!columns[columnId]) {
+                const auto *record = findColumn(schemaDefinition, containerId, columnId);
+                if (!record) {
+                    throw RecoveryError("snapshot column does not match schema");
+                }
+                columns[columnId].emplace(schemaDefinition.schemaId,
+                                          containerId,
+                                          columnId,
+                                          record->info.debugName);
+            } else if (columns[columnId]->containerId() != containerId) {
+                throw RecoveryError("snapshot column does not match schema");
+            }
+            return *columns[columnId];
+        }
+
+        const VariantHandle &variant(ContainerId containerId, VariantId variantId)
+        {
+            if (variantId >= variants.size()) {
+                throw RecoveryError("snapshot variant does not match schema");
+            }
+            if (!variants[variantId]) {
+                const auto *container = findContainer(schemaDefinition, containerId);
+                const VariantDefinitionRecord *record = nullptr;
+                if (container) {
+                    const auto it = std::find_if(container->variants.begin(),
+                                                 container->variants.end(),
+                                                 [variantId](const auto &candidate) {
+                                                     return candidate.id == variantId;
+                                                 });
+                    if (it != container->variants.end()) {
+                        record = &*it;
+                    }
+                }
+                if (!record) {
+                    throw RecoveryError("snapshot variant does not match schema");
+                }
+                variants[variantId].emplace(schemaDefinition.schemaId,
+                                            containerId,
+                                            variantId,
+                                            record->debugName);
+            } else if (variants[variantId]->containerId() != containerId) {
+                throw RecoveryError("snapshot variant does not match schema");
+            }
+            return *variants[variantId];
+        }
+
+        const SchemaDefinitionData &schemaDefinition;
+        std::vector<std::optional<ColumnHandle>> columns;
+        std::vector<std::optional<VariantHandle>> variants;
+    };
+
+    std::size_t snapshotValueEncodedSize(const Value &value)
+    {
+        switch (value.type()) {
+            case ValueType::Null:
+                return 1;
+            case ValueType::Bool:
+                return 2;
+            case ValueType::Int64:
+            case ValueType::UInt64:
+            case ValueType::Double:
+                return 9;
+            case ValueType::String:
+                return 9 + value.asString().size();
+            case ValueType::Binary:
+                return 9 + value.asBinary().size();
+        }
+        return std::numeric_limits<std::size_t>::max();
+    }
+
+    struct SnapshotValueHash {
+        std::size_t operator()(const Value &value) const noexcept
+        {
+            auto combine = [](std::size_t seed, std::size_t payload) {
+                return seed ^ (payload + std::size_t {0x9e3779b9} + (seed << 6) + (seed >> 2));
+            };
+            auto seed = static_cast<std::size_t>(value.type());
+            switch (value.type()) {
+                case ValueType::Null:
+                    return seed;
+                case ValueType::Bool:
+                    return combine(seed, std::hash<bool> {}(value.asBool()));
+                case ValueType::Int64:
+                    return combine(seed, std::hash<std::int64_t> {}(value.asInt64()));
+                case ValueType::UInt64:
+                    return combine(seed, std::hash<std::uint64_t> {}(value.asUInt64()));
+                case ValueType::Double:
+                    return combine(seed,
+                                   std::hash<std::uint64_t> {}(
+                                       std::bit_cast<std::uint64_t>(value.asDouble())));
+                case ValueType::String:
+                    return combine(seed, std::hash<std::string> {}(value.asString()));
+                case ValueType::Binary:
+                    for (auto byte : value.asBinary()) {
+                        seed = combine(seed, static_cast<std::size_t>(byte));
+                    }
+                    return seed;
+            }
+            return seed;
+        }
+    };
+
+    struct SnapshotValueEqual {
+        bool operator()(const Value &lhs, const Value &rhs) const noexcept
+        {
+            if (lhs.type() != rhs.type()) {
+                return false;
+            }
+            switch (lhs.type()) {
+                case ValueType::Null:
+                    return true;
+                case ValueType::Bool:
+                    return lhs.asBool() == rhs.asBool();
+                case ValueType::Int64:
+                    return lhs.asInt64() == rhs.asInt64();
+                case ValueType::UInt64:
+                    return lhs.asUInt64() == rhs.asUInt64();
+                case ValueType::Double:
+                    return std::bit_cast<std::uint64_t>(lhs.asDouble()) ==
+                           std::bit_cast<std::uint64_t>(rhs.asDouble());
+                case ValueType::String:
+                    return lhs.asString() == rhs.asString();
+                case ValueType::Binary:
+                    return lhs.asBinary() == rhs.asBinary();
+            }
+            return false;
+        }
+    };
+
+    struct SnapshotValueDictionary {
+        explicit SnapshotValueDictionary(const std::vector<ItemSnapshot> &snapshots)
+        {
+            std::size_t valueCount = 0;
+            for (const auto &snapshot : snapshots) {
+                valueCount += snapshot.values.size();
+            }
+            positions.reserve(valueCount);
+            values.reserve(std::min(valueCount, std::size_t {4096}));
+            std::size_t directBytes = 0;
+            std::size_t dictionaryValueBytes = 0;
+            for (const auto &snapshot : snapshots) {
+                for (const auto &columnValue : snapshot.values) {
+                    const auto encodedSize = snapshotValueEncodedSize(columnValue.value);
+                    directBytes += encodedSize;
+                    const auto [it, inserted] = positions.emplace(columnValue.value, values.size());
+                    if (inserted) {
+                        values.push_back(columnValue.value);
+                        dictionaryValueBytes += encodedSize;
+                    }
+                }
+            }
+            enabled = values.size() <= std::numeric_limits<std::uint32_t>::max() &&
+                      8 + dictionaryValueBytes + valueCount * 4 < directBytes;
+            if (!enabled) {
+                positions.clear();
+                values.clear();
+            }
+        }
+
+        std::uint32_t index(const Value &value) const
+        {
+            const auto it = positions.find(value);
+            if (it == positions.end()) {
+                throw RecoveryError("snapshot value dictionary is incomplete");
+            }
+            return static_cast<std::uint32_t>(it->second);
+        }
+
+        bool enabled = false;
+        std::vector<Value> values;
+        std::unordered_map<Value, std::size_t, SnapshotValueHash, SnapshotValueEqual> positions;
+    };
+
+    void writeEngineSnapshotItem(BinaryWriter &writer,
+                                 const ItemSnapshot &snapshot,
+                                 const SnapshotValueDictionary *dictionary)
+    {
+        writer.writeUInt64(snapshot.id);
+        writer.writeByte(static_cast<std::uint8_t>(snapshot.containerKind));
+        writer.writeUInt32(snapshot.containerId);
+        writer.writeBool(snapshot.variant.has_value());
+        if (snapshot.variant) {
+            writer.writeUInt32(snapshot.variant->variantId());
+        }
+        writer.writeSize(snapshot.values.size());
+        for (const auto &columnValue : snapshot.values) {
+            writer.writeUInt32(columnValue.column.columnId());
+            if (dictionary) {
+                writer.writeUInt32(dictionary->index(columnValue.value));
+            } else {
+                writeValue(writer, columnValue.value);
+            }
+        }
+        writer.writeBool(snapshot.listIndex.has_value());
+        if (snapshot.listIndex) {
+            writer.writeSize(*snapshot.listIndex);
+        }
+    }
+
+    ItemSnapshot readEngineSnapshotItem(BinaryReader &reader,
+                                        SnapshotHandleCache &handles,
+                                        const std::vector<Value> *dictionary)
+    {
+        ItemSnapshot snapshot;
+        snapshot.id = reader.readUInt64();
+        snapshot.containerKind = static_cast<ContainerKind>(reader.readByte());
+        snapshot.containerId = reader.readUInt32();
+        if (reader.readBool()) {
+            snapshot.variant = handles.variant(snapshot.containerId, reader.readUInt32());
+        }
+        const auto valueCount = reader.readSize();
+        snapshot.values.reserve(valueCount);
+        for (std::size_t i = 0; i < valueCount; ++i) {
+            const auto columnId = reader.readUInt32();
+            auto value = [&]() -> Value {
+                if (dictionary) {
+                    const auto valueIndex = reader.readUInt32();
+                    if (valueIndex >= dictionary->size()) {
+                        throw RecoveryError("snapshot value dictionary index is out of range");
+                    }
+                    return (*dictionary)[valueIndex];
+                }
+                return readValue(reader);
+            }();
+            snapshot.values.push_back(ColumnValue {
+                .column = handles.column(snapshot.containerId, columnId),
+                .value = std::move(value),
+            });
+        }
+        applyRelationMetadata(handles.schemaDefinition, snapshot);
+        const auto &container = containerFor(handles.schemaDefinition, snapshot.containerId);
+        if (snapshot.containerKind == ContainerKind::List && container.listAssociation) {
+            const auto *relation = findRelation(handles.schemaDefinition,
+                                                snapshot.containerId,
+                                                *container.listAssociation);
+            if (!relation) {
+                throw RecoveryError("snapshot list association does not match schema");
+            }
+            const auto &associationValue = valueForColumn(snapshot, relation->info.column.columnId());
+            if (!associationValue.isNull()) {
+                snapshot.listAssociationValue = associationValue;
+            }
+        }
+        if (reader.readBool()) {
+            snapshot.listIndex = reader.readSize();
+        }
+        return snapshot;
+    }
+
     } // namespace
 
 DocumentEngine::DocumentEngine(EngineSchema schema) : _impl(std::make_unique<Impl>(std::move(schema)))
@@ -3684,9 +3999,17 @@ ByteArray DocumentEngine::createSnapshot() const
         (void)id;
         snapshots.push_back(item.snapshot);
     }
+    const SnapshotValueDictionary dictionary(snapshots);
+    writer.writeBool(dictionary.enabled);
+    if (dictionary.enabled) {
+        writer.writeSize(dictionary.values.size());
+        for (const auto &value : dictionary.values) {
+            writeValue(writer, value);
+        }
+    }
     writer.writeSize(snapshots.size());
     for (const auto &snapshot : snapshots) {
-        writeItemSnapshot(writer, snapshot);
+        writeEngineSnapshotItem(writer, snapshot, dictionary.enabled ? &dictionary : nullptr);
     }
     return std::move(writer.bytes);
 }
@@ -3712,39 +4035,29 @@ void DocumentEngine::restoreSnapshot(const ByteArray &snapshot)
         _impl->items.clear();
         _impl->listGroups.clear();
         _impl->indexes.clear();
+        std::vector<Value> dictionary;
+        if (reader.readBool()) {
+            const auto valueCount = reader.readSize();
+            dictionary.reserve(valueCount);
+            for (std::size_t i = 0; i < valueCount; ++i) {
+                dictionary.push_back(readValue(reader));
+            }
+        }
         const auto itemCount = reader.readSize();
         std::vector<ItemSnapshot> snapshots;
         snapshots.reserve(itemCount);
+        SnapshotHandleCache handles(schemaData(_impl->schema));
         for (std::size_t i = 0; i < itemCount; ++i) {
-            snapshots.push_back(readItemSnapshot(reader));
+            snapshots.push_back(readEngineSnapshotItem(reader,
+                                                        handles,
+                                                        dictionary.empty() ? nullptr : &dictionary));
         }
         if (!reader.atEnd()) {
             throw RecoveryError("trailing bytes after snapshot");
         }
-        while (!snapshots.empty()) {
-            bool progressed = false;
-            for (auto it = snapshots.begin(); it != snapshots.end();) {
-                const bool parentReady = !it->parentId || contains(*it->parentId);
-                bool listReady = true;
-                if (it->containerKind == ContainerKind::List && it->listAssociationValue && it->listIndex) {
-                    const auto key = valueKey(*it->listAssociationValue);
-                    const auto groupIt = _impl->listGroups.find({it->containerId, key});
-                    const auto currentSize = groupIt == _impl->listGroups.end() ? 0 : groupIt->second.size();
-                    listReady = *it->listIndex <= currentSize;
-                }
-                if (parentReady && listReady) {
-                    insertSnapshot(*_impl, *it);
-                    it = snapshots.erase(it);
-                    progressed = true;
-                } else {
-                    ++it;
-                }
-            }
-            if (!progressed) {
-                throw RecoveryError("snapshot contains unresolved parent or list ordering dependencies");
-            }
+        if (!restoreItemSnapshots(*_impl, std::move(snapshots))) {
+            throw RecoveryError("snapshot contains unresolved parent or list ordering dependencies");
         }
-        rebuildIndexes(*_impl);
         clearUndoHistory();
     } catch (const DiniError &) {
         throw;

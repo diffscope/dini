@@ -255,19 +255,33 @@ bool BinaryReader::readBool()
 
 std::uint32_t BinaryReader::readUInt32()
 {
-    std::uint32_t value = 0;
-    for (int i = 0; i < 4; ++i) {
-        value |= static_cast<std::uint32_t>(readByte()) << (i * 8);
+    constexpr std::size_t width = sizeof(std::uint32_t);
+    if (_bytes.size() - _offset < width) {
+        throw LogError("unexpected end of bytes");
     }
+    const auto value = static_cast<std::uint32_t>(_bytes[_offset]) |
+                       (static_cast<std::uint32_t>(_bytes[_offset + 1]) << 8) |
+                       (static_cast<std::uint32_t>(_bytes[_offset + 2]) << 16) |
+                       (static_cast<std::uint32_t>(_bytes[_offset + 3]) << 24);
+    _offset += width;
     return value;
 }
 
 std::uint64_t BinaryReader::readUInt64()
 {
-    std::uint64_t value = 0;
-    for (int i = 0; i < 8; ++i) {
-        value |= static_cast<std::uint64_t>(readByte()) << (i * 8);
+    constexpr std::size_t width = sizeof(std::uint64_t);
+    if (_bytes.size() - _offset < width) {
+        throw LogError("unexpected end of bytes");
     }
+    const auto value = static_cast<std::uint64_t>(_bytes[_offset]) |
+                       (static_cast<std::uint64_t>(_bytes[_offset + 1]) << 8) |
+                       (static_cast<std::uint64_t>(_bytes[_offset + 2]) << 16) |
+                       (static_cast<std::uint64_t>(_bytes[_offset + 3]) << 24) |
+                       (static_cast<std::uint64_t>(_bytes[_offset + 4]) << 32) |
+                       (static_cast<std::uint64_t>(_bytes[_offset + 5]) << 40) |
+                       (static_cast<std::uint64_t>(_bytes[_offset + 6]) << 48) |
+                       (static_cast<std::uint64_t>(_bytes[_offset + 7]) << 56);
+    _offset += width;
     return value;
 }
 
