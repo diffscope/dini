@@ -15,6 +15,8 @@
 
 namespace dini {
 
+class EngineSchema;
+
 /**
  * @brief Associates one column handle with one runtime value.
  *
@@ -376,23 +378,23 @@ public:
     ChangeSet invert() const;
 
     /**
-     * @brief Serializes this change set into standalone bytes.
+     * @brief Serializes this change set using schema-local identifiers.
      *
-     * @pre None; schema compatibility is the caller's responsibility.
-     * @post The returned bytes can be deserialized with ChangeSet::deserialize().
-     * @throws LogError if serialization cannot represent an operation.
+     * @pre The operations represent changes produced by the engine.
+     * @post The returned bytes can be deserialized with the corresponding schema.
      */
     ByteArray serialize() const;
 
     /**
-     * @brief Deserializes one standalone change set.
+     * @brief Deserializes a change set using the current engine schema.
      *
      * @param bytes Bytes produced by serialize().
-     * @pre bytes are assumed to target the schema where the change set will be replayed.
-     * @post The returned change set has not been checked against any schema.
+     * @param schema Frozen schema of the engine that will replay the change set.
+     * @pre The bytes use identifiers from schema.
+     * @post The returned change set uses handles from schema.
      * @throws LogError if bytes are corrupt or use an unsupported format.
      */
-    static ChangeSet deserialize(const ByteArray &bytes);
+    static ChangeSet deserialize(const ByteArray &bytes, const EngineSchema &schema);
 
     /**
      * @brief Merges multiple change sets into their final semantic change stream.

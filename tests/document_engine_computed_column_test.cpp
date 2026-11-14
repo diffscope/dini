@@ -515,7 +515,7 @@ TEST(DocumentEngineComputedColumnTest, ComputedColumnChangeSetReplay)
     // --- Act: engine B recovers from snapshot + replay ---
     DocumentEngine engineB(schema);
     engineB.restoreSnapshot(snapshot);
-    engineB.replayChangeSet(ChangeSet::deserialize(changeSetBytes));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSetBytes, engineB.schema()));
 
     // --- Assert: computed column values match engine A ---
     EXPECT_EQ(engineB.read(itemId, a).asInt64(), 5);

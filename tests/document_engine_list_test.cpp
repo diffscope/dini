@@ -963,7 +963,7 @@ TEST(DocumentEngineListTest, ListNullAssociationSurvivesSnapshotAndChangeSetRepl
     EXPECT_FALSE(restored.read(element).listAssociationValue.has_value());
 
     DocumentEngine replayed(ps.schema);
-    replayed.replayChangeSet(ChangeSet::deserialize(result.changeSet.serialize()));
+    replayed.replayChangeSet(ChangeSet::deserialize(result.changeSet.serialize(), replayed.schema()));
     EXPECT_TRUE(replayed.contains(element));
     EXPECT_TRUE(replayed.read(element, ps.playlistAssociation.column()).isNull());
     EXPECT_FALSE(replayed.read(element).listAssociationValue.has_value());
@@ -1031,4 +1031,51 @@ TEST(DocumentEngineListTest, ListRemoveAtChangesetKind)
         }
     }
     EXPECT_TRUE(foundListRemoved);
+}
+
+TEST(DocumentEngineListTest, ListChangesSurviveSerializationAndReplay)
+{
+    const PlaylistSchema ps;
+    DocumentEngine engine(ps.schema);
+    const auto songs = seedThreeSongs(engine, ps);
+    const auto association = idValue(songs.song1);
+    DocumentEngine replayed(ps.schema);
+    replayed.restoreSnapshot(engine.createSnapshot());
+
+    auto insert = engine.beginTransaction();
+    const auto first = insertListItem(insert, ps.playlistList, association, 0, {
+        ColumnValue {.column = ps.playlistPosition, .value = Value(std::int64_t {10})},
+    });
+    const auto second = insertListItem(insert, ps.playlistList, association, 1, {
+        ColumnValue {.column = ps.playlistPosition, .value = Value(std::int64_t {20})},
+    });
+    const auto inserted = ChangeSet::deserialize(insert.commit().changeSet.serialize(), replayed.schema());
+    ASSERT_EQ(inserted.operations().size(), 2U);
+    const auto &insertion = std::get<ListInsertedChange>(inserted.operations().back().payload());
+    EXPECT_EQ(insertion.list, ps.playlistList);
+    EXPECT_EQ(insertion.associationValue, association);
+    EXPECT_EQ(insertion.index, 1U);
+    EXPECT_EQ(insertion.item.parentId, songs.song1);
+    replayed.replayChangeSet(inserted);
+    EXPECT_EQ(orderedIdsForAssociation(replayed.view(ps.playlistList), association), (std::vector<ItemId> {first, second}));
+
+    auto rotate = engine.beginTransaction();
+    rotate.rotate(ps.playlistList, association, ListRotation {.startIndex = 0, .count = 2, .offset = 1});
+    replayed.replayChangeSet(ChangeSet::deserialize(rotate.commit().changeSet.serialize(), replayed.schema()));
+    EXPECT_EQ(orderedIdsForAssociation(replayed.view(ps.playlistList), association), (std::vector<ItemId> {second, first}));
+
+    auto remove = engine.beginTransaction();
+    remove.removeAt(ps.playlistList, association, 1, 1);
+    const auto removed = ChangeSet::deserialize(remove.commit().changeSet.serialize(), replayed.schema());
+    ASSERT_EQ(removed.operations().size(), 1U);
+    const auto &removal = std::get<ListRemovedChange>(removed.operations().front().payload());
+    EXPECT_EQ(removal.list, ps.playlistList);
+    EXPECT_EQ(removal.associationValue, association);
+    EXPECT_EQ(removal.index, 1U);
+    EXPECT_EQ(removal.item.id, first);
+    replayed.replayChangeSet(removed);
+    EXPECT_EQ(orderedIdsForAssociation(replayed.view(ps.playlistList), association), (std::vector<ItemId> {second}));
+
+    replayed.replayChangeSet(removed.invert());
+    EXPECT_EQ(orderedIdsForAssociation(replayed.view(ps.playlistList), association), (std::vector<ItemId> {second, first}));
 }

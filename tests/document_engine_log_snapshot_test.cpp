@@ -426,7 +426,7 @@ TEST(DocumentEngineSnapshotSerializationTest, ReplaySingleChangeSet)
     // Before replay, value is still the seed value
     EXPECT_EQ(engineB.read(seed.item1Id, s.itemValue).asInt64(), 100);
 
-    engineB.replayChangeSet(ChangeSet::deserialize(changeSetBytes));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSetBytes, engineB.schema()));
 
     // After replay, value matches engine A's post-commit state
     EXPECT_EQ(engineB.read(seed.item1Id, s.itemValue).asInt64(), 150);
@@ -478,9 +478,9 @@ TEST(DocumentEngineSnapshotSerializationTest, ReplayMultipleChangeSets)
     engineB.restoreSnapshot(snapshot);
 
     // Replay in order
-    engineB.replayChangeSet(ChangeSet::deserialize(changeSet1));
-    engineB.replayChangeSet(ChangeSet::deserialize(changeSet2));
-    engineB.replayChangeSet(ChangeSet::deserialize(changeSet3));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet1, engineB.schema()));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet2, engineB.schema()));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet3, engineB.schema()));
 
     // Final state matches engine A
     EXPECT_EQ(engineB.read(seed.item1Id, s.itemName).asString(), "AlphaPrime");
@@ -530,8 +530,8 @@ TEST(DocumentEngineSnapshotSerializationTest, RecoveryEngineStateEqualToOriginal
     // Recover: engine B <- snapshot + all change sets
     DocumentEngine engineB(s.schema);
     engineB.restoreSnapshot(snapshot);
-    engineB.replayChangeSet(ChangeSet::deserialize(changeSet1));
-    engineB.replayChangeSet(ChangeSet::deserialize(changeSet2));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet1, engineB.schema()));
+    engineB.replayChangeSet(ChangeSet::deserialize(changeSet2, engineB.schema()));
 
     // ---- Compare every item ----
     auto itemsA = engineA.view(s.itemTable).toVector();

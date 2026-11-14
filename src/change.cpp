@@ -258,9 +258,9 @@ ByteArray ChangeSet::serialize() const
     return serializeChangeSet(*this);
 }
 
-ChangeSet ChangeSet::deserialize(const ByteArray &bytes)
+ChangeSet ChangeSet::deserialize(const ByteArray &bytes, const EngineSchema &schema)
 {
-    return deserializeChangeSet(bytes);
+    return deserializeChangeSet(bytes, schema);
 }
 
 ChangeSet ChangeSet::merge(const std::vector<ChangeSet> &changes)

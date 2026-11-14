@@ -1,6 +1,7 @@
 #ifndef DINI_CHANGE_P_H
 #define DINI_CHANGE_P_H
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -8,6 +9,9 @@
 #include <dini/change.h>
 
 namespace dini {
+
+struct ContainerDefinitionRecord;
+struct SchemaDefinitionData;
 
 struct ChangeOperation::Impl : SharedData {
     using Decl = ChangeOperation;
@@ -48,7 +52,25 @@ struct UndoStep::Impl : SharedData {
 };
 
 ByteArray serializeChangeSet(const ChangeSet &changeSet);
-ChangeSet deserializeChangeSet(const ByteArray &bytes);
+ChangeSet deserializeChangeSet(const ByteArray &bytes, const EngineSchema &schema);
+
+class SchemaHandleCache {
+public:
+    explicit SchemaHandleCache(const SchemaDefinitionData &schema);
+
+    const ContainerDefinitionRecord &container(ContainerId id) const;
+    const ListHandle &list(ContainerId id);
+    const ColumnHandle &column(ColumnId id);
+    const VariantHandle &variant(VariantId id);
+
+private:
+    const SchemaDefinitionData &_schema;
+    std::vector<std::optional<ListHandle>> _lists;
+    std::vector<std::optional<ColumnHandle>> _columns;
+    std::vector<std::optional<VariantHandle>> _variants;
+};
+
+void restoreItemRelationMetadata(const ContainerDefinitionRecord &container, ItemSnapshot &snapshot);
 
 struct BinaryWriter {
     ByteArray bytes;
@@ -56,6 +78,7 @@ struct BinaryWriter {
     void writeByte(std::uint8_t value);
     void writeBool(bool value);
     void writeUInt32(std::uint32_t value);
+    void writeVarUInt32(std::uint32_t value);
     void writeUInt64(std::uint64_t value);
     void writeInt64(std::int64_t value);
     void writeSize(std::size_t value);
@@ -69,9 +92,11 @@ public:
     explicit BinaryReader(const ByteArray &bytes);
 
     bool atEnd() const noexcept;
+    std::size_t remainingSize() const noexcept;
     std::uint8_t readByte();
     bool readBool();
     std::uint32_t readUInt32();
+    std::uint32_t readVarUInt32();
     std::uint64_t readUInt64();
     std::int64_t readInt64();
     std::size_t readSize();
@@ -86,14 +111,6 @@ private:
 
 void writeValue(BinaryWriter &writer, const Value &value);
 Value readValue(BinaryReader &reader);
-void writeColumnHandle(BinaryWriter &writer, const ColumnHandle &handle);
-ColumnHandle readColumnHandle(BinaryReader &reader);
-void writeListHandle(BinaryWriter &writer, const ListHandle &handle);
-ListHandle readListHandle(BinaryReader &reader);
-void writeVariantHandle(BinaryWriter &writer, const VariantHandle &handle);
-VariantHandle readVariantHandle(BinaryReader &reader);
-void writeItemSnapshot(BinaryWriter &writer, const ItemSnapshot &snapshot);
-ItemSnapshot readItemSnapshot(BinaryReader &reader);
 
 } // namespace dini
 

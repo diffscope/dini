@@ -391,14 +391,18 @@ namespace dini {
         }
     }
 
-    void applyRelationMetadata(const SchemaDefinitionData &schemaDefinition, ItemSnapshot &snapshot)
+    void applyRelationMetadata(const ContainerDefinitionRecord &container, ItemSnapshot &snapshot)
     {
         snapshot.parentId.reset();
-        const auto &container = containerFor(schemaDefinition, snapshot.containerId);
         for (const auto &relation : container.relations) {
             const auto &value = valueForColumn(snapshot, relation.info.column.columnId());
             snapshot.parentId = itemIdFromValue(value);
         }
+    }
+
+    void applyRelationMetadata(const SchemaDefinitionData &schemaDefinition, ItemSnapshot &snapshot)
+    {
+        applyRelationMetadata(containerFor(schemaDefinition, snapshot.containerId), snapshot);
     }
 
     void refreshListIndexes(DocumentEngine::Impl &engine,
@@ -3458,70 +3462,6 @@ namespace dini {
         }
     }
 
-    struct SnapshotHandleCache {
-        explicit SnapshotHandleCache(const SchemaDefinitionData &schemaDefinition)
-            : schemaDefinition(schemaDefinition),
-              columns(schemaDefinition.nextColumnId),
-              variants(schemaDefinition.nextVariantId)
-        {
-        }
-
-        const ColumnHandle &column(ContainerId containerId, ColumnId columnId)
-        {
-            if (columnId >= columns.size()) {
-                throw RecoveryError("snapshot column does not match schema");
-            }
-            if (!columns[columnId]) {
-                const auto *record = findColumn(schemaDefinition, containerId, columnId);
-                if (!record) {
-                    throw RecoveryError("snapshot column does not match schema");
-                }
-                columns[columnId].emplace(schemaDefinition.schemaId,
-                                          containerId,
-                                          columnId,
-                                          record->info.debugName);
-            } else if (columns[columnId]->containerId() != containerId) {
-                throw RecoveryError("snapshot column does not match schema");
-            }
-            return *columns[columnId];
-        }
-
-        const VariantHandle &variant(ContainerId containerId, VariantId variantId)
-        {
-            if (variantId >= variants.size()) {
-                throw RecoveryError("snapshot variant does not match schema");
-            }
-            if (!variants[variantId]) {
-                const auto *container = findContainer(schemaDefinition, containerId);
-                const VariantDefinitionRecord *record = nullptr;
-                if (container) {
-                    const auto it = std::find_if(container->variants.begin(),
-                                                 container->variants.end(),
-                                                 [variantId](const auto &candidate) {
-                                                     return candidate.id == variantId;
-                                                 });
-                    if (it != container->variants.end()) {
-                        record = &*it;
-                    }
-                }
-                if (!record) {
-                    throw RecoveryError("snapshot variant does not match schema");
-                }
-                variants[variantId].emplace(schemaDefinition.schemaId,
-                                            containerId,
-                                            variantId,
-                                            record->debugName);
-            } else if (variants[variantId]->containerId() != containerId) {
-                throw RecoveryError("snapshot variant does not match schema");
-            }
-            return *variants[variantId];
-        }
-
-        const SchemaDefinitionData &schemaDefinition;
-        std::vector<std::optional<ColumnHandle>> columns;
-        std::vector<std::optional<VariantHandle>> variants;
-    };
-
     std::size_t snapshotValueEncodedSize(const Value &value)
     {
         switch (value.type()) {
@@ -3671,7 +3611,7 @@ namespace dini {
     }
 
     ItemSnapshot readEngineSnapshotItem(BinaryReader &reader,
-                                        SnapshotHandleCache &handles,
+                                        SchemaHandleCache &handles,
                                         const std::vector<Value> *dictionary)
     {
         ItemSnapshot snapshot;
@@ -3679,12 +3619,20 @@ namespace dini {
         snapshot.containerKind = static_cast<ContainerKind>(reader.readByte());
         snapshot.containerId = reader.readUInt32();
         if (reader.readBool()) {
-            snapshot.variant = handles.variant(snapshot.containerId, reader.readUInt32());
+            const auto &variant = handles.variant(reader.readUInt32());
+            if (variant.containerId() != snapshot.containerId) {
+                throw RecoveryError("snapshot variant does not match schema");
+            }
+            snapshot.variant = variant;
         }
         const auto valueCount = reader.readSize();
         snapshot.values.reserve(valueCount);
         for (std::size_t i = 0; i < valueCount; ++i) {
             const auto columnId = reader.readUInt32();
+            const auto &column = handles.column(columnId);
+            if (column.containerId() != snapshot.containerId) {
+                throw RecoveryError("snapshot column does not match schema");
+            }
             auto value = [&]() -> Value {
                 if (dictionary) {
                     const auto valueIndex = reader.readUInt32();
@@ -3696,24 +3644,11 @@ namespace dini {
                 return readValue(reader);
             }();
             snapshot.values.push_back(ColumnValue {
-                .column = handles.column(snapshot.containerId, columnId),
+                .column = column,
                 .value = std::move(value),
             });
         }
-        applyRelationMetadata(handles.schemaDefinition, snapshot);
-        const auto &container = containerFor(handles.schemaDefinition, snapshot.containerId);
-        if (snapshot.containerKind == ContainerKind::List && container.listAssociation) {
-            const auto *relation = findRelation(handles.schemaDefinition,
-                                                snapshot.containerId,
-                                                *container.listAssociation);
-            if (!relation) {
-                throw RecoveryError("snapshot list association does not match schema");
-            }
-            const auto &associationValue = valueForColumn(snapshot, relation->info.column.columnId());
-            if (!associationValue.isNull()) {
-                snapshot.listAssociationValue = associationValue;
-            }
-        }
+        restoreItemRelationMetadata(handles.container(snapshot.containerId), snapshot);
         if (reader.readBool()) {
             snapshot.listIndex = reader.readSize();
         }
@@ -3721,6 +3656,21 @@ namespace dini {
     }
 
     } // namespace
+
+void restoreItemRelationMetadata(const ContainerDefinitionRecord &container, ItemSnapshot &snapshot)
+{
+    applyRelationMetadata(container, snapshot);
+    if (snapshot.containerKind != ContainerKind::List || !container.listAssociation) {
+        return;
+    }
+    const auto relation = std::find_if(container.relations.begin(), container.relations.end(), [&](const auto &candidate) {
+        return candidate.info.id == *container.listAssociation;
+    });
+    const auto &associationValue = valueForColumn(snapshot, relation->info.column.columnId());
+    if (!associationValue.isNull()) {
+        snapshot.listAssociationValue = associationValue;
+    }
+}
 
 DocumentEngine::DocumentEngine(EngineSchema schema) : _impl(std::make_unique<Impl>(std::move(schema)))
 {
@@ -4046,7 +3996,7 @@ void DocumentEngine::restoreSnapshot(const ByteArray &snapshot)
         const auto itemCount = reader.readSize();
         std::vector<ItemSnapshot> snapshots;
         snapshots.reserve(itemCount);
-        SnapshotHandleCache handles(schemaData(_impl->schema));
+        SchemaHandleCache handles(schemaData(_impl->schema));
         for (std::size_t i = 0; i < itemCount; ++i) {
             snapshots.push_back(readEngineSnapshotItem(reader,
                                                         handles,

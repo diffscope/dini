@@ -2,14 +2,17 @@
 
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+#include <type_traits>
 
 #include <dini/errors.h>
+
+#include "schema_p.h"
 
 namespace dini {
 
     namespace {
 
-    // Magic and version does not need to be changed during development, even if the format changes.
     constexpr std::uint8_t changeSetMagic[] = {0x7f, 'D', 'I', 'N', 'I', 'C', 'S', '2'};
     constexpr std::uint32_t changeSetFormatVersion = 2;
 
@@ -62,6 +65,66 @@ namespace dini {
         return options;
     }
 
+    void writeItemSnapshot(BinaryWriter &writer, const ItemSnapshot &snapshot)
+    {
+        writer.writeUInt64(snapshot.id);
+        writer.writeVarUInt32(snapshot.containerId);
+        writer.writeVarUInt32(snapshot.variant ? snapshot.variant->variantId() : 0);
+        writer.writeSize(snapshot.values.size());
+        for (const auto &columnValue : snapshot.values) {
+            writer.writeVarUInt32(columnValue.column.columnId());
+            writeValue(writer, columnValue.value);
+        }
+        writer.writeBool(snapshot.listIndex.has_value());
+        if (snapshot.listIndex) {
+            writer.writeSize(*snapshot.listIndex);
+        }
+    }
+
+    ItemSnapshot readItemSnapshot(BinaryReader &reader, SchemaHandleCache &handles)
+    {
+        ItemSnapshot snapshot;
+        snapshot.id = reader.readUInt64();
+        snapshot.containerId = reader.readVarUInt32();
+        const auto &container = handles.container(snapshot.containerId);
+        snapshot.containerKind = container.info.kind;
+        const auto variantId = reader.readVarUInt32();
+        if (variantId != 0) {
+            snapshot.variant = handles.variant(variantId);
+        }
+        const auto valueCount = reader.readSize();
+        if (valueCount > reader.remainingSize() / 2) {
+            throw LogError("item column values are truncated");
+        }
+        snapshot.values.reserve(valueCount);
+        for (std::size_t i = 0; i < valueCount; ++i) {
+            snapshot.values.push_back(ColumnValue {
+                .column = handles.column(reader.readVarUInt32()),
+                .value = readValue(reader),
+            });
+        }
+        if (reader.readBool()) {
+            snapshot.listIndex = reader.readSize();
+        }
+        restoreItemRelationMetadata(container, snapshot);
+        return snapshot;
+    }
+
+    template <typename Change>
+    ChangeOperation readListOperation(BinaryReader &reader, SchemaHandleCache &handles)
+    {
+        auto item = readItemSnapshot(reader, handles);
+        if (!item.listAssociationValue || !item.listIndex) {
+            throw LogError("list change is missing its association or index");
+        }
+        return ChangeOperation(Change {
+            .list = handles.list(item.containerId),
+            .associationValue = *item.listAssociationValue,
+            .index = *item.listIndex,
+            .item = std::move(item),
+        });
+    }
+
     void writeOperation(BinaryWriter &writer, const ChangeOperation &operation)
     {
         writer.writeByte(static_cast<std::uint8_t>(operation.kind()));
@@ -75,7 +138,7 @@ namespace dini {
                     writer.writeBool(change.cascade);
                 } else if constexpr (std::is_same_v<T, ColumnUpdatedChange>) {
                     writer.writeUInt64(change.itemId);
-                    writeColumnHandle(writer, change.column);
+                    writer.writeVarUInt32(change.column.columnId());
                     writeValue(writer, change.oldValue);
                     writeValue(writer, change.newValue);
                     writeAssociationOptions(writer, change.associationOptions);
@@ -85,24 +148,16 @@ namespace dini {
                     }
                 } else if constexpr (std::is_same_v<T, ComputedColumnUpdatedChange>) {
                     writer.writeUInt64(change.itemId);
-                    writeColumnHandle(writer, change.column);
+                    writer.writeVarUInt32(change.column.columnId());
                     writeValue(writer, change.oldValue);
                     writeValue(writer, change.newValue);
                 } else if constexpr (std::is_same_v<T, CascadeRemovedChange>) {
                     writeItemSnapshot(writer, change.item);
                     writer.writeUInt64(change.ancestorId);
-                } else if constexpr (std::is_same_v<T, ListInsertedChange>) {
-                    writeListHandle(writer, change.list);
-                    writeValue(writer, change.associationValue);
-                    writer.writeSize(change.index);
-                    writeItemSnapshot(writer, change.item);
-                } else if constexpr (std::is_same_v<T, ListRemovedChange>) {
-                    writeListHandle(writer, change.list);
-                    writeValue(writer, change.associationValue);
-                    writer.writeSize(change.index);
+                } else if constexpr (std::is_same_v<T, ListInsertedChange> || std::is_same_v<T, ListRemovedChange>) {
                     writeItemSnapshot(writer, change.item);
                 } else if constexpr (std::is_same_v<T, ListRotatedChange>) {
-                    writeListHandle(writer, change.list);
+                    writer.writeVarUInt32(change.list.containerId());
                     writeValue(writer, change.associationValue);
                     writeRotation(writer, change.rotation);
                 }
@@ -110,24 +165,24 @@ namespace dini {
             operation.payload());
     }
 
-    ChangeOperation readOperation(BinaryReader &reader)
+    ChangeOperation readOperation(BinaryReader &reader, SchemaHandleCache &handles)
     {
         const auto kind = static_cast<ChangeOperationKind>(reader.readByte());
         switch (kind) {
             case ChangeOperationKind::ItemInserted:
                 return ChangeOperation(ItemInsertedChange {
-                    .item = readItemSnapshot(reader),
+                    .item = readItemSnapshot(reader, handles),
                 });
             case ChangeOperationKind::ItemRemoved:
                 return ChangeOperation(ItemRemovedChange {
-                    .item = readItemSnapshot(reader),
+                    .item = readItemSnapshot(reader, handles),
                     .cascade = reader.readBool(),
                 });
             case ChangeOperationKind::ColumnUpdated:
             {
                 ColumnUpdatedChange change {
                     .itemId = reader.readUInt64(),
-                    .column = readColumnHandle(reader),
+                    .column = handles.column(reader.readVarUInt32()),
                     .oldValue = readValue(reader),
                     .newValue = readValue(reader),
                     .associationOptions = readAssociationOptions(reader),
@@ -140,32 +195,22 @@ namespace dini {
             case ChangeOperationKind::ComputedColumnUpdated:
                 return ChangeOperation(ComputedColumnUpdatedChange {
                     .itemId = reader.readUInt64(),
-                    .column = readColumnHandle(reader),
+                    .column = handles.column(reader.readVarUInt32()),
                     .oldValue = readValue(reader),
                     .newValue = readValue(reader),
                 });
             case ChangeOperationKind::CascadeRemoved:
                 return ChangeOperation(CascadeRemovedChange {
-                    .item = readItemSnapshot(reader),
+                    .item = readItemSnapshot(reader, handles),
                     .ancestorId = reader.readUInt64(),
                 });
             case ChangeOperationKind::ListInserted:
-                return ChangeOperation(ListInsertedChange {
-                    .list = readListHandle(reader),
-                    .associationValue = readValue(reader),
-                    .index = reader.readSize(),
-                    .item = readItemSnapshot(reader),
-                });
+                return readListOperation<ListInsertedChange>(reader, handles);
             case ChangeOperationKind::ListRemoved:
-                return ChangeOperation(ListRemovedChange {
-                    .list = readListHandle(reader),
-                    .associationValue = readValue(reader),
-                    .index = reader.readSize(),
-                    .item = readItemSnapshot(reader),
-                });
+                return readListOperation<ListRemovedChange>(reader, handles);
             case ChangeOperationKind::ListRotated:
                 return ChangeOperation(ListRotatedChange {
-                    .list = readListHandle(reader),
+                    .list = handles.list(reader.readVarUInt32()),
                     .associationValue = readValue(reader),
                     .rotation = readRotation(reader),
                 });
@@ -190,6 +235,15 @@ void BinaryWriter::writeUInt32(std::uint32_t value)
     for (int i = 0; i < 4; ++i) {
         writeByte(static_cast<std::uint8_t>((value >> (i * 8)) & 0xffU));
     }
+}
+
+void BinaryWriter::writeVarUInt32(std::uint32_t value)
+{
+    while (value >= 0x80) {
+        writeByte(static_cast<std::uint8_t>((value & 0x7f) | 0x80));
+        value >>= 7;
+    }
+    writeByte(static_cast<std::uint8_t>(value));
 }
 
 void BinaryWriter::writeUInt64(std::uint64_t value)
@@ -236,6 +290,11 @@ bool BinaryReader::atEnd() const noexcept
     return _offset == _bytes.size();
 }
 
+std::size_t BinaryReader::remainingSize() const noexcept
+{
+    return _bytes.size() - _offset;
+}
+
 std::uint8_t BinaryReader::readByte()
 {
     if (_offset >= _bytes.size()) {
@@ -265,6 +324,22 @@ std::uint32_t BinaryReader::readUInt32()
                        (static_cast<std::uint32_t>(_bytes[_offset + 3]) << 24);
     _offset += width;
     return value;
+}
+
+std::uint32_t BinaryReader::readVarUInt32()
+{
+    std::uint32_t value = 0;
+    for (int shift = 0; shift <= 28; shift += 7) {
+        const auto byte = readByte();
+        if (shift == 28 && byte > 0x0f) {
+            break;
+        }
+        value |= static_cast<std::uint32_t>(byte & 0x7f) << shift;
+        if ((byte & 0x80) == 0) {
+            return value;
+        }
+    }
+    throw LogError("variable-length integer is out of range");
 }
 
 std::uint64_t BinaryReader::readUInt64()
@@ -375,110 +450,47 @@ Value readValue(BinaryReader &reader)
     throw LogError("unknown value type");
 }
 
-void writeColumnHandle(BinaryWriter &writer, const ColumnHandle &handle)
+SchemaHandleCache::SchemaHandleCache(const SchemaDefinitionData &schema)
+    : _schema(schema),
+      _lists(schema.nextContainerId),
+      _columns(schema.nextColumnId),
+      _variants(schema.nextVariantId)
 {
-    writer.writeUInt64(handle.schemaId());
-    writer.writeUInt32(handle.containerId());
-    writer.writeUInt32(handle.columnId());
-    writer.writeString(handle.debugName());
-}
-
-ColumnHandle readColumnHandle(BinaryReader &reader)
-{
-    const auto schemaId = reader.readUInt64();
-    const auto containerId = reader.readUInt32();
-    const auto columnId = reader.readUInt32();
-    auto debugName = reader.readString();
-    return ColumnHandle(schemaId, containerId, columnId, std::move(debugName));
-}
-
-void writeListHandle(BinaryWriter &writer, const ListHandle &handle)
-{
-    writer.writeUInt64(handle.schemaId());
-    writer.writeUInt32(handle.containerId());
-    writer.writeString(handle.debugName());
-}
-
-ListHandle readListHandle(BinaryReader &reader)
-{
-    const auto schemaId = reader.readUInt64();
-    const auto containerId = reader.readUInt32();
-    auto debugName = reader.readString();
-    return ListHandle(schemaId, containerId, std::move(debugName));
-}
-
-void writeVariantHandle(BinaryWriter &writer, const VariantHandle &handle)
-{
-    writer.writeUInt64(handle.schemaId());
-    writer.writeUInt32(handle.containerId());
-    writer.writeUInt32(handle.variantId());
-    writer.writeString(handle.debugName());
-}
-
-VariantHandle readVariantHandle(BinaryReader &reader)
-{
-    const auto schemaId = reader.readUInt64();
-    const auto containerId = reader.readUInt32();
-    const auto variantId = reader.readUInt32();
-    auto debugName = reader.readString();
-    return VariantHandle(schemaId, containerId, variantId, std::move(debugName));
-}
-
-void writeItemSnapshot(BinaryWriter &writer, const ItemSnapshot &snapshot)
-{
-    writer.writeUInt64(snapshot.id);
-    writer.writeByte(static_cast<std::uint8_t>(snapshot.containerKind));
-    writer.writeUInt32(snapshot.containerId);
-    writer.writeBool(snapshot.parentId.has_value());
-    if (snapshot.parentId) {
-        writer.writeUInt64(*snapshot.parentId);
-    }
-    writer.writeBool(snapshot.variant.has_value());
-    if (snapshot.variant) {
-        writeVariantHandle(writer, *snapshot.variant);
-    }
-    writer.writeSize(snapshot.values.size());
-    for (const auto &columnValue : snapshot.values) {
-        writeColumnHandle(writer, columnValue.column);
-        writeValue(writer, columnValue.value);
-    }
-    writer.writeBool(snapshot.listAssociationValue.has_value());
-    if (snapshot.listAssociationValue) {
-        writeValue(writer, *snapshot.listAssociationValue);
-    }
-    writer.writeBool(snapshot.listIndex.has_value());
-    if (snapshot.listIndex) {
-        writer.writeSize(*snapshot.listIndex);
+    for (const auto &container : schema.containers) {
+        for (const auto &variant : container.variants) {
+            _variants[variant.id].emplace(schema.schemaId, variant.containerId, variant.id, variant.debugName);
+        }
     }
 }
 
-ItemSnapshot readItemSnapshot(BinaryReader &reader)
+const ContainerDefinitionRecord &SchemaHandleCache::container(ContainerId id) const
 {
-    ItemSnapshot snapshot;
-    snapshot.id = reader.readUInt64();
-    snapshot.containerKind = static_cast<ContainerKind>(reader.readByte());
-    snapshot.containerId = reader.readUInt32();
-    if (reader.readBool()) {
-        snapshot.parentId = reader.readUInt64();
+    return _schema.containers.at(static_cast<std::size_t>(id) - 1);
+}
+
+const ListHandle &SchemaHandleCache::list(ContainerId id)
+{
+    auto &handle = _lists.at(id);
+    if (!handle) {
+        handle.emplace(_schema.schemaId, id, container(id).info.debugName);
     }
-    if (reader.readBool()) {
-        snapshot.variant = readVariantHandle(reader);
+    return *handle;
+}
+
+const ColumnHandle &SchemaHandleCache::column(ColumnId id)
+{
+    auto &handle = _columns.at(id);
+    if (!handle) {
+        const auto [containerId, position] = _schema.columnLocations.at(id);
+        const auto &column = container(containerId).columns[position];
+        handle.emplace(_schema.schemaId, containerId, id, column.info.debugName);
     }
-    const auto valueCount = reader.readSize();
-    snapshot.values.reserve(valueCount);
-    for (std::size_t i = 0; i < valueCount; ++i) {
-        snapshot.values.push_back(ColumnValue {
-            .column = readColumnHandle(reader),
-            .value = readValue(reader),
-        });
-    }
-    if (reader.readBool()) {
-        snapshot.listAssociationValue = readValue(reader);
-    }
-    if (reader.readBool()) {
-        snapshot.listIndex = reader.readSize();
-    }
-    return snapshot;
+    return *handle;
+}
+
+const VariantHandle &SchemaHandleCache::variant(VariantId id)
+{
+    return _variants.at(id).value();
 }
 
 ByteArray serializeChangeSet(const ChangeSet &changeSet)
@@ -498,7 +510,7 @@ ByteArray serializeChangeSet(const ChangeSet &changeSet)
     return std::move(writer.bytes);
 }
 
-ChangeSet deserializeChangeSet(const ByteArray &bytes)
+ChangeSet deserializeChangeSet(const ByteArray &bytes, const EngineSchema &schema)
 {
     BinaryReader reader(bytes);
     readMagic(reader);
@@ -506,22 +518,27 @@ ChangeSet deserializeChangeSet(const ByteArray &bytes)
     if (version != changeSetFormatVersion) {
         throw LogError("unsupported change set version");
     }
-    ChangeSet changeSet;
-    const auto operationCount = reader.readSize();
-    for (std::size_t i = 0; i < operationCount; ++i) {
-        changeSet.append(readOperation(reader));
+    try {
+        SchemaHandleCache handles(schemaData(schema));
+        ChangeSet changeSet;
+        const auto operationCount = reader.readSize();
+        for (std::size_t i = 0; i < operationCount; ++i) {
+            changeSet.append(readOperation(reader, handles));
+        }
+        const auto linkCount = reader.readSize();
+        for (std::size_t i = 0; i < linkCount; ++i) {
+            changeSet.addDerivedLink(DerivedChangeLink {
+                .sourceOperation = reader.readSize(),
+                .derivedOperation = reader.readSize(),
+            });
+        }
+        if (!reader.atEnd()) {
+            throw LogError("trailing bytes after change set");
+        }
+        return changeSet;
+    } catch (const std::out_of_range &) {
+        throw LogError("change set index is out of range");
     }
-    const auto linkCount = reader.readSize();
-    for (std::size_t i = 0; i < linkCount; ++i) {
-        changeSet.addDerivedLink(DerivedChangeLink {
-            .sourceOperation = reader.readSize(),
-            .derivedOperation = reader.readSize(),
-        });
-    }
-    if (!reader.atEnd()) {
-        throw LogError("trailing bytes after change set");
-    }
-    return changeSet;
 }
 
 } // namespace dini
